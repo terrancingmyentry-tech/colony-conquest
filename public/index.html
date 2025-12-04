@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Colony Conquest</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <style>
+    body { font-family: sans-serif; margin: 0; background: #f4f4f4; overflow-x: hidden; color: #222; }
+    #header { background: #34495e; color: #fff; padding: 10px; text-align: center; font-size: 24px; }
+    #lobby { padding: 10px; }
+    button { cursor: pointer; margin: 3px; }
+    canvas { background: #fff; border: 1px solid #333; display: block; margin-top:10px; }
+    #playersList div { margin: 4px 0; }
+    #hostControls { margin-top: 10px; padding: 8px; background: #ddd; display: none; }
+    label { display: block; margin-top: 4px; }
+    .lobbySection { margin-bottom: 10px; padding: 6px; background: #ddd; }
+    #turnInfo, #lastMoveInfo, #turnTimer { font-weight: bold; display:inline-block; margin-right: 10px; }
+    #zoomControls { margin-top: 8px; }
+    #leaveBtn, #leaveGameBtn { margin-top: 10px; background: #c0392b; color: #fff; padding: 6px 10px; border: none; border-radius: 4px; }
+    #leaveBtn:hover, #leaveGameBtn:hover { background: #e74c3c; }
+    input[type=color] { width: 40px; height: 24px; padding:0; border:none; vertical-align:middle; }
+    .tileCoord { position:absolute; background:white; color:black; font-size:10px; padding:0 2px; pointer-events:none; z-index:10; border-radius:2px; }
+    #mapContainer { position:relative; display:inline-block; overflow:hidden; }
+    #gameUI { display:none; padding: 10px; }
+    .advancedOptions { display: none; margin-top: 10px; padding: 6px; background: #f0f0f0; }
+    .advancedOptions.show { display: block; }
+    #advancedBtn { background: #3498db; color: #fff; padding: 8px 12px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+    #advancedBtn:hover { background: #2980b9; }
+    #advancedBtn.open::after { content: ' �'; }
+    #advancedBtn.closed::after { content: ' ?'; }
+    #chatPanel { position: relative; width: 250px; height: 600px; background: #fff; border: 2px solid #34495e; border-radius: 4px; display: none; flex-direction: column; z-index: 50; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+    #chatPanel.show { display: flex; }
+    #chatMessages { flex: 1; overflow-y: auto; padding: 8px; font-size: 12px; background: #fafafa; border: 1px solid #ecf0f1; border-radius: 3px; margin: 8px; max-height: calc(100% - 70px); }
+    #chatMessages::-webkit-scrollbar { width: 6px; }
+    #chatMessages::-webkit-scrollbar-track { background: #ecf0f1; border-radius: 3px; }
+    #chatMessages::-webkit-scrollbar-thumb { background: #bdc3c7; border-radius: 3px; }
+    #chatMessages::-webkit-scrollbar-thumb:hover { background: #95a5a6; }
+    #chatInput { padding: 6px; border: 1px solid #ccc; border-radius: 3px; font-size: 12px; }
+    #chatSend { padding: 6px 12px; background: #3498db; color: #fff; border: none; cursor: pointer; border-radius: 3px; font-weight: bold; }
+    #lobbyBrowser { margin-top: 10px; padding: 8px; background: #f0f0f0; border: 1px solid #ccc; max-height: 200px; overflow-y: auto; }
+    .lobbyItem { padding: 6px; margin: 4px 0; background: #fff; border: 1px solid #ddd; cursor: pointer; border-radius: 3px; }
+    .lobbyItem:hover { background: #eee; }
+    .kickBtn { margin-left: auto; background: #e74c3c; color: #fff; border: none; padding: 4px 8px; cursor: pointer; border-radius: 3px; }
+    #loadingOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.8); display: none; flex-direction: column; align-items: center; justify-content: center; z-index: 999; }
+    .loadingContent { background: #fff; padding: 40px; border-radius: 8px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+    .loadingContent h2 { margin: 0 0 20px 0; color: #34495e; }
+    .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto 20px; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="header">Colony Conquest</div>
+
+  <!-- Lobby -->
+  <div id="lobby" style="display: flex; gap: 20px; padding: 10px;">
+    <div style="flex: 1;">
+      <div class="lobbySection">
+      <h3>Create Lobby</h3>
+      <label>Name: <input id="hostName" type="text" value="Host" maxlength="30" placeholder="Max 30 characters"></label>
+      <label>Color: <input id="hostColor" type="color" value="#e74c3c"></label>
+      <label>Max Players: <select id="maxPlayers"></select></label>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <label style="margin:0;">AI - Normal: <select id="aiNormal"></select></label>
+        <label style="margin:0;">AI - Advanced: <select id="aiAdvanced"></select></label>
+        <label style="margin:0;">AI - Grandmaster: <select id="aiGrandmaster"></select></label>
+      </div>
+      <label>Map Size: <select id="mapSize"></select></label>
+      
+      <!-- Normal Section -->
+      <div style="margin-top: 12px; padding: 8px; background: #fff; border-left: 3px solid #3498db;">
+        <label><input type="checkbox" id="obstacleOn" checked> Obstacles</label>
+        <label>Obstacle %: <select id="obstaclePct"></select></label>
+        <label><input type="checkbox" id="obstacleHpOn"> Obstacle HP Enabled</label>
+        <label id="obstacleHpLabel" style="display:none;">Obstacle HP: <select id="obstacleHp"></select></label>
+        
+        <label style="margin-top: 10px;"><input type="checkbox" id="waterOn"> Water</label>
+        <label>Water %: <select id="waterPct"></select></label>
+        <label><input type="checkbox" id="scatteredWaterOn"> Scattered Water Points</label>
+        <label><input type="checkbox" id="riverOn"> Rivers</label>
+        <label><input type="checkbox" id="lakeOn"> Lakes</label>
+      </div>
+      
+      <!-- Advanced Section -->
+      <button id="advancedBtn" class="closed">Advanced Options</button>
+      <div id="advancedOptions" class="advancedOptions">
+        <label>Tile Events Max: <select id="tileEventsMax"></select></label>
+        <label style="margin-top: 10px;"><input type="checkbox" id="poisonWaterOn"> Poison Water Enabled</label>
+      </div>
+      
+      <!-- Privacy Section -->
+      <label style="margin-top: 10px;"><input type="checkbox" id="lobbyPrivate"> Private Lobby</label>
+      <label>Password: <input type="password" id="lobbyPassword" placeholder="Leave blank for no password" style="margin-left: 4px;"></label>
+      
+      <!-- Create Button (outside collapsible) -->
+      <button id="createBtn" style="margin-top: 10px; background: #27ae60; color: #fff; padding: 10px 20px; font-size: 16px;">Create Lobby</button>
+    </div>
+
+    <div class="lobbySection">
+      <h3>Join Lobby</h3>
+      <label>Name: <input id="joinName" type="text" value="Guest" maxlength="30" placeholder="Max 30 characters"></label>
+      <label>Color: <input id="joinColor" type="color" value="#3498db"></label>
+      
+      <!-- Lobby Browser -->
+      <div style="margin-top: 10px;">
+        <h4>Available Lobbies:</h4>
+        <div id="lobbyBrowser">
+          <div style="text-align: center; color: #999;">Loading lobbies...</div>
+        </div>
+      </div>
+      
+      <!-- Manual Join -->
+      <label style="margin-top: 10px;">Or enter code: <input id="joinInput" type="text" placeholder="Room code"></label>
+      <label><input type="password" id="joinPassword" placeholder="Password (if private)"></label>
+      <button id="joinBtn">Join by Code</button>
+    </div>
+
+    <div id="roomLabel">Room: —</div>
+    <div id="hostControls">
+      <button id="startBtn" style="display:none;">Start Game</button>
+    </div>
+
+    <div id="playersList"></div>
+    <button id="leaveBtn" style="display:none;">Leave Room</button>
+    </div>
+    
+    <!-- Lobby Guide Panel -->
+    <div id="lobbyGuidePanel" style="width: 300px; background: #fff; border: 2px solid #34495e; border-radius: 4px; display: flex; flex-direction: column; z-index: 50; box-shadow: 0 2px 8px rgba(0,0,0,0.15); max-height: 600px;">
+      <div style="padding: 8px; background: #34495e; color: #fff; font-weight: bold; cursor: pointer; display: flex; justify-content: space-between; align-items: center; user-select: none;" id="lobbyGuidePanelToggle">
+        <span>Guide</span>
+        <span id="lobbyGuidePanelToggleArrow" style="font-size: 14px;">▼</span>
+      </div>
+      <div id="lobbyGuidePanelContent" style="flex: 1; overflow-y: auto; display: none;">
+      </div>
+    </div>
+  </div>
+
+  <!-- Game UI -->
+  <div id="gameUI">
+    <button id="leaveGameBtn">Leave Game</button>
+    <div>
+      <span id="turnInfo">Turn: �</span>
+      <span id="turnTimer">? 30s left</span>
+      <span id="lastMoveInfo">Last Move: �</span>
+    </div>
+
+    <div style="display: flex; gap: 20px; align-items: flex-start;">
+      <div id="mapContainer" style="width:600px;height:600px;position:relative;">
+        <canvas id="canvas" width="600" height="600"></canvas>
+      </div>
+      
+      <div id="chatPanel" style="width: 250px; height: 600px; background: #fff; border: 2px solid #34495e; border-radius: 4px; display: flex; flex-direction: column; z-index: 50; box-shadow: 0 2px 8px rgba(0,0,0,0.15);">
+        <div style="padding: 8px; background: #3498db; color: #fff; font-weight: bold;">Chat</div>
+        <div id="chatMessages" style="flex: 1; overflow-y: auto; padding: 8px; font-size: 12px; background: #fafafa; border: 1px solid #ecf0f1; border-radius: 3px; margin: 8px; max-height: calc(100% - 70px);"></div>
+        <div style="display: flex; gap: 4px; padding: 4px;">
+          <input id="chatInput" type="text" placeholder="Message..." style="flex: 1;">
+          <button id="chatSend">Send</button>
+        </div>
+      </div>
+      
+      <div id="guidePanel" style="width: 250px; max-height: 600px; background: #fff; border: 2px solid #34495e; border-radius: 4px; display: flex; flex-direction: column; z-index: 50; box-shadow: 0 2px 8px rgba(0,0,0,0.15); overflow: hidden;">
+        <div style="padding: 8px; background: #34495e; color: #fff; font-weight: bold; cursor: pointer; display: flex; justify-content: space-between; align-items: center; user-select: none;">
+          <span>Guide</span>
+          <span id="guidePanelToggle" style="font-size: 14px;">▼</span>
+        </div>
+        <div id="guidePanelContent" style="flex: 1; overflow-y: auto; display: none;">
+        </div>
+      </div>
+    </div>
+
+    <div id="zoomControls">
+      <button id="zoomIn">Zoom In</button>
+      <button id="zoomOut">Zoom Out</button>
+    </div>
+  </div>
+
+  <!-- Loading Overlay -->
+  <div id="loadingOverlay">
+    <div class="loadingContent">
+      <h2>Loading Terrain...</h2>
+      <div class="spinner"></div>
+      <p>Please wait while textures are being loaded</p>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/game-client.js"></script>
+  <script src="/index.js"></script>
+</body>
+</html>
