@@ -831,10 +831,11 @@ io.on('connection', socket => {
       const roomId = nanoid(6).toUpperCase();
       // normalize aiConfig (counts per difficulty)
       const normalizedAi = aiConfig && typeof aiConfig === 'object' ? {
+        training: Number(aiConfig.training) || 0,
         normal: Number(aiConfig.normal) || 0,
         advanced: Number(aiConfig.advanced) || 0,
         grandmaster: Number(aiConfig.grandmaster) || 0
-      } : { normal: Number(aiCount) || 0, advanced: 0, grandmaster: 0 };
+      } : { training: 0, normal: Number(aiCount) || 0, advanced: 0, grandmaster: 0 };
 
       const room = {
         roomId,
@@ -938,7 +939,7 @@ io.on('connection', socket => {
     // NOTE: previously this respected room.config.maxPlayers which could prevent spawning all requested bots.
     // To honor the user's requested AI counts, add all requested AI bots (may exceed maxPlayers).
     const botColors = ['#2ecc71','#9b59b6','#e67e22','#1abc9c','#f06292','#f4d03f','#95a5a6'];
-    const aiCfg = room.config.aiConfig || { normal: 0, advanced: 0, grandmaster: 0 };
+    const aiCfg = room.config.aiConfig || { training: 0, normal: 0, advanced: 0, grandmaster: 0 };
 
     function addBotsUnbounded(count, levelName) {
       const addCount = Math.max(0, Number(count) || 0);
@@ -948,6 +949,7 @@ io.on('connection', socket => {
       }
     }
 
+    addBotsUnbounded(aiCfg.training, 'training');
     addBotsUnbounded(aiCfg.normal, 'normal');
     addBotsUnbounded(aiCfg.advanced, 'advanced');
     addBotsUnbounded(aiCfg.grandmaster, 'grandmaster');
