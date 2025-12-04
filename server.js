@@ -778,6 +778,10 @@ function runAI(roomId, pid) {
 
   // Let the AI module pick a move (considers tier + personality)
   const pick = ai.decideMove(st, pid, st.playersMeta[pid]);
+  try {
+    const pmeta = st.playersMeta[pid] || {};
+    console.log(`AI pick - pid=${pid} name=${pmeta.name || ''} personality=${pmeta.personality || pmeta.personality} level=${pmeta.aiLevel || 'normal'} pick=${pick ? `${pick.x},${pick.y}` : 'none'}`);
+  } catch (e) { /* ignore logging errors */ }
 
   if (!pick) return nextNormalTurn(roomId);
   const tile = st.grid[pick.y][pick.x];
