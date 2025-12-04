@@ -16,6 +16,8 @@ app.use(express.static('public'));
 
 const rooms = {};
 
+const ai = require('./ai/player-ai');
+
 // -------------------------
 // Utilities
 function inside(x, y, size) { return x >= 0 && y >= 0 && x < size && y < size; }
@@ -764,7 +766,7 @@ function runAI(roomId, pid) {
     // No valid starter position found for AI (respect blocked zones) � skip placement
     return nextStarterTurn(roomId);
   }
-
+  // Build candidate list (existing units)
   let candidates = [];
   for (let y = 0; y < st.size; y++) {
     for (let x = 0; x < st.size; x++) {
@@ -773,151 +775,9 @@ function runAI(roomId, pid) {
     }
   }
   if (!candidates.length) return nextNormalTurn(roomId);
-  candidates = shuffle(candidates);
-  candidates.sort((a,b) => {
-    if (a.level === 2 && b.level !== 2) return -1;
-    if (b.level === 2 && a.level !== 2) return 1;
-    return b.level - a.level;
-  });
-  // AI strategy dispatch by difficulty level (default: normal)
-  const aiLevel = meta.aiLevel || 'normal';
 
-  function cloneState(s) { return JSON.parse(JSON.stringify(s)); }
-
-  function scoreForPid(s, pidToScore) {
-    let score = 0;
-    for (let yy = 0; yy < s.size; yy++) for (let xx = 0; xx < s.size; xx++) {
-      const c = s.grid[yy][xx];
-      if (!c) continue;
-      if (c.type === 'unit') {
-        score += (c.pid === pidToScore) ? (10 * c.level) : (-8 * c.level);
-      } else if (c.type === 'obstacle') {
-        if (c.hp) score -= (c.hp * 0.5);
-      }
-    }
-    return score;
-  }
-
-  function simulateMoveAndScore(origState, moveX, moveY, ownerPid) {
-    const s = cloneState(origState);
-    const tile = s.grid[moveY][moveX];
-    if (!tile) {
-      s.grid[moveY][moveX] = { type: 'unit', pid: ownerPid, level: 1 };
-    } else if (tile.type === 'unit') {
-      if (tile.level === 3) {
-        s.grid[moveY][moveX] = null;
-        const dirs = [[0,-1],[0,1],[-1,0],[1,0]];
-        for (const [dx,dy] of dirs) {
-          const nx = moveX + dx, ny = moveY + dy;
-          if (nx < 0 || ny < 0 || nx >= s.size || ny >= s.size) continue;
-          const t = s.grid[ny][nx];
-          if (!t) s.grid[ny][nx] = { type: 'unit', pid: ownerPid, level: 1 };
-          else if (t.type === 'unit') {
-            t.pid = ownerPid;
-            t.level = Math.min(3, (t.level || 1) + 1);
-          }
-        }
-      } else {
-        tile.level = Math.min(3, tile.level + 1);
-      }
-    }
-    return scoreForPid(s, ownerPid);
-  }
-
-  // Advanced: pick move maximizing own immediate score minus best opponent immediate reply
-  function pickMoveAdvanced(stateObj) {
-    let best = null;
-    let bestVal = -Infinity;
-    for (const c of candidates) {
-      const myScore = simulateMoveAndScore(stateObj, c.x, c.y, pid);
-      let worstOpp = -Infinity;
-      for (const opPidStr of Object.keys(stateObj.playersMeta)) {
-        const opPid = Number(opPidStr);
-        if (opPid === pid) continue;
-        const oppCandidates = [];
-        for (let yy = 0; yy < stateObj.size; yy++) for (let xx = 0; xx < stateObj.size; xx++) {
-          const t = stateObj.grid[yy][xx]; if (t && t.type === 'unit' && t.pid === opPid) oppCandidates.push({ x: xx, y: yy, level: t.level });
-        }
-        for (const oc of oppCandidates) {
-          const oppScore = simulateMoveAndScore(stateObj, oc.x, oc.y, opPid);
-          worstOpp = Math.max(worstOpp, oppScore);
-        }
-      }
-      const val = myScore - (worstOpp === -Infinity ? 0 : worstOpp * 0.5);
-      if (val > bestVal) { bestVal = val; best = c; }
-    }
-    return best || candidates[0];
-  }
-
-  // Grandmaster: limited-depth lookahead (minimax-like) with restricted branching
-  function pickMoveGrandmaster(stateObj, depth = 4, breadth = 3) {
-    function genMovesFor(pidToGen, s) {
-      const moves = [];
-      for (let yy = 0; yy < s.size; yy++) for (let xx = 0; xx < s.size; xx++) {
-        const t = s.grid[yy][xx]; if (t && t.type === 'unit' && t.pid === pidToGen) moves.push({ x: xx, y: yy, level: t.level });
-      }
-      moves.sort((a,b) => b.level - a.level);
-      return moves.slice(0, breadth);
-    }
-
-    function recurse(s, currentPid, depthLeft) {
-      if (depthLeft === 0) return scoreForPid(s, pid);
-      const moves = genMovesFor(currentPid, s);
-      if (!moves.length) return scoreForPid(s, pid);
-      let bestLocal = (currentPid === pid) ? -Infinity : Infinity;
-      for (const m of moves) {
-        const sCopy = JSON.parse(JSON.stringify(s));
-        if (!sCopy.grid[m.y][m.x]) sCopy.grid[m.y][m.x] = { type: 'unit', pid: currentPid, level: 1 };
-        else if (sCopy.grid[m.y][m.x].type === 'unit') {
-          if (sCopy.grid[m.y][m.x].level === 3) {
-            sCopy.grid[m.y][m.x] = null;
-            const dirs = [[0,-1],[0,1],[-1,0],[1,0]];
-            for (const [dx,dy] of dirs) {
-              const nx = m.x + dx, ny = m.y + dy;
-              if (nx < 0 || ny < 0 || nx >= sCopy.size || ny >= sCopy.size) continue;
-              const t = sCopy.grid[ny][nx];
-              if (!t) sCopy.grid[ny][nx] = { type: 'unit', pid: currentPid, level: 1 };
-              else if (t.type === 'unit') { t.pid = currentPid; t.level = Math.min(3, (t.level||1)+1); }
-            }
-          } else sCopy.grid[m.y][m.x].level = Math.min(3, sCopy.grid[m.y][m.x].level + 1);
-        }
-        const pids = Object.keys(sCopy.playersMeta).map(k => Number(k)).filter(n => sCopy.playersMeta[n] && sCopy.playersMeta[n].alive);
-        const idx = pids.indexOf(currentPid);
-        const nextIdx = (idx + 1) % pids.length;
-        const nextPid = pids[nextIdx];
-        const val = recurse(sCopy, nextPid, depthLeft - 1);
-        if (currentPid === pid) bestLocal = Math.max(bestLocal, val); else bestLocal = Math.min(bestLocal, val);
-      }
-      return bestLocal;
-    }
-
-    let bestMove = null; let bestVal = -Infinity;
-    for (const c of candidates.slice(0, breadth)) {
-      const s0 = JSON.parse(JSON.stringify(stateObj));
-      if (!s0.grid[c.y][c.x]) s0.grid[c.y][c.x] = { type: 'unit', pid: pid, level: 1 };
-      else if (s0.grid[c.y][c.x].type === 'unit') {
-        if (s0.grid[c.y][c.x].level === 3) {
-          s0.grid[c.y][c.x] = null;
-          const dirs = [[0,-1],[0,1],[-1,0],[1,0]];
-          for (const [dx,dy] of dirs) {
-            const nx = c.x + dx, ny = c.y + dy;
-            if (nx < 0 || ny < 0 || nx >= s0.size || ny >= s0.size) continue;
-            const t = s0.grid[ny][nx];
-            if (!t) s0.grid[ny][nx] = { type: 'unit', pid: pid, level: 1 };
-            else if (t.type === 'unit') { t.pid = pid; t.level = Math.min(3, (t.level||1)+1); }
-          }
-        } else s0.grid[c.y][c.x].level = Math.min(3, s0.grid[c.y][c.x].level + 1);
-      }
-      const val = recurse(s0, pid, depth - 1);
-      if (val > bestVal) { bestVal = val; bestMove = c; }
-    }
-    return bestMove || candidates[0];
-  }
-
-  let pick;
-  if (aiLevel === 'grandmaster') pick = pickMoveGrandmaster(st, 5, 3);
-  else if (aiLevel === 'advanced') pick = pickMoveAdvanced(st);
-  else pick = candidates[0];
+  // Let the AI module pick a move (considers tier + personality)
+  const pick = ai.decideMove(st, pid, st.playersMeta[pid]);
 
   if (!pick) return nextNormalTurn(roomId);
   const tile = st.grid[pick.y][pick.x];
