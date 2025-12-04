@@ -776,12 +776,26 @@ function runAI(roomId, pid) {
   }
   if (!candidates.length) return nextNormalTurn(roomId);
 
-  // Let the AI module pick a move (considers tier + personality)
-  const pick = ai.decideMove(st, pid, st.playersMeta[pid]);
+  // Wrap AI decision with a timeout (3 seconds max) to prevent freeze
+  let pick = null;
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    console.warn(`AI decision timeout for pid=${pid} in room=${roomId}, picking random move`);
+    pick = candidates[Math.floor(Math.random() * candidates.length)] || null;
+  }, 3000);
+
   try {
-    const pmeta = st.playersMeta[pid] || {};
-    console.log(`AI pick - pid=${pid} name=${pmeta.name || ''} personality=${pmeta.personality || pmeta.personality} level=${pmeta.aiLevel || 'normal'} pick=${pick ? `${pick.x},${pick.y}` : 'none'}`);
-  } catch (e) { /* ignore logging errors */ }
+    pick = ai.decideMove(st, pid, st.playersMeta[pid]);
+  } catch (e) {
+    console.error(`AI decision error for pid=${pid}:`, e.message);
+    pick = candidates[0] || null;
+  }
+  
+  clearTimeout(timeout);
+  if (timedOut) {
+    // timeout already set pick
+  }
 
   if (!pick) return nextNormalTurn(roomId);
   const tile = st.grid[pick.y][pick.x];
@@ -793,6 +807,10 @@ function runAI(roomId, pid) {
   io.to(roomId).emit('state', st);
   removeDeadPlayers(room);
   checkEndGame(roomId);
+  try {
+    const pmeta = st.playersMeta[pid] || {};
+    console.log(`AI pick - pid=${pid} name=${pmeta.name || ''} personality=${pmeta.personality || pmeta.personality} level=${pmeta.aiLevel || 'normal'} pick=${pick ? `${pick.x},${pick.y}` : 'none'}`);
+  } catch (e) { /* ignore logging errors */ }
   return nextNormalTurn(roomId);
 }
 

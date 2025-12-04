@@ -55,7 +55,9 @@ function genMovesFor(pidToGen, s) {
   return moves;
 }
 
-function minimax(s, targetPid, currentPid, depthLeft, breadth) {
+function minimax(s, targetPid, currentPid, depthLeft, breadth, callDepth = 0) {
+  // Safety: abort if recursion gets too deep (stack overflow protection)
+  if (callDepth > 50) return scoreForPid(s, targetPid);
   if (depthLeft === 0) return scoreForPid(s, targetPid);
   const moves = genMovesFor(currentPid, s).slice(0, breadth);
   if (!moves.length) return scoreForPid(s, targetPid);
@@ -80,7 +82,7 @@ function minimax(s, targetPid, currentPid, depthLeft, breadth) {
     const idx = pids.indexOf(currentPid);
     const nextIdx = (idx + 1) % pids.length;
     const nextPid = pids[nextIdx];
-    const val = minimax(sCopy, targetPid, nextPid, depthLeft - 1, breadth);
+    const val = minimax(sCopy, targetPid, nextPid, depthLeft - 1, breadth, callDepth + 1);
     if (currentPid === targetPid) bestLocal = Math.max(bestLocal, val); else bestLocal = Math.min(bestLocal, val);
   }
   return bestLocal;
@@ -129,12 +131,12 @@ function decideMove(state, pid, meta) {
       const adj = adjacencyBonus(state, pid, c.x, c.y);
       val = immediate + adj * 0.8 - (c.level * 0.5);
     } else if (personality === 'strategist') {
-      // use shallow minimax
-      val = minimax(state, pid, pid, Math.max(1, Math.min(depth, 2)), breadth);
+      // use shallow minimax (capped at depth 2)
+      val = minimax(state, pid, pid, Math.max(1, Math.min(depth, 2)), breadth, 0);
     } else if (personality === 'gambler') {
-      // evaluate both best and worst quickly
-      const bestVal = minimax(state, pid, pid, 1, breadth);
-      const worstVal = minimax(state, pid, pid, 1, breadth);
+      // evaluate both best and worst quickly (depth 1 only)
+      const bestVal = minimax(state, pid, pid, 1, breadth, 0);
+      const worstVal = minimax(state, pid, pid, 1, breadth, 0);
       val = Math.random() < 0.5 ? bestVal : worstVal;
     } else if (personality === 'hunter') {
       // maximize own score minus opponent best reply
@@ -152,9 +154,9 @@ function decideMove(state, pid, meta) {
       val = myScore - (worstOpp === -Infinity ? 0 : worstOpp * 0.6);
     }
 
-    // deeper lookahead adjustment for higher tiers
+    // deeper lookahead adjustment for higher tiers (capped at depth 3 to prevent freeze)
     if (depth > 1 && (personality === 'strategist' || personality === 'hunter' || levelName === 'grandmaster')) {
-      const mm = minimax(state, pid, pid, Math.min(depth, 5), breadth);
+      const mm = minimax(state, pid, pid, Math.min(depth, 3), breadth, 0);
       val = (val * 0.6) + (mm * 0.4);
     }
 
