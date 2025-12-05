@@ -33,11 +33,13 @@
 
     /* Responsive layout: make map fill available width on small screens */
     @media (max-width: 900px) {
-      #gameUI { padding: 8px; }
-      #mapContainer { width: calc(100vw - 40px); height: calc(100vw - 40px); }
-      canvas { width: 100% !important; height: 100% !important; }
+      #gameUI { padding: 8px; display: flex; flex-direction: column; }
+      #gameUI > div:nth-child(3) { display: flex; flex-direction: column; align-items: center; }
+      #mapContainer { width: 100vw; height: 100vw; max-width: 100vh; max-height: 100vh; box-sizing: border-box; }
+      canvas { width: 100% !important; height: 100% !important; display: block; }
       #chatPanel, #guidePanel { display: none; }
-      #mapContainer { margin: 0 auto; }
+      #mapContainer { margin: 0 auto; position: relative; }
+      .cam-controls { position: fixed; right: 12px; bottom: 12px; z-index: 100 !important; }
     }
     #gameUI { display:none; padding: 10px; }
     .advancedOptions { display: none; margin-top: 10px; padding: 6px; background: #f0f0f0; }
@@ -169,11 +171,12 @@
           <button id="actionDowngrade" class="action-downgrade">−</button>
           <button id="actionUpgrade" class="action-upgrade">＋</button>
         </div>
-        <!-- Camera controls for touch devices -->
-        <div id="camControls" class="cam-controls" style="display:none;">
-          <div></div><button id="camUp">↑</button><div></div>
-          <button id="camLeft">←</button><button id="camDown">↓</button><button id="camRight">→</button>
-        </div>
+      </div>
+      
+      <!-- Camera controls for touch devices (moved outside map container) -->
+      <div id="camControls" class="cam-controls" style="display:none;">
+        <div></div><button id="camUp">↑</button><div></div>
+        <button id="camLeft">←</button><button id="camDown">↓</button><button id="camRight">→</button>
       </div>
       
       <div id="chatPanel" style="width: 250px; height: 600px; background: #fff; border: 2px solid #34495e; border-radius: 4px; display: flex; flex-direction: column; z-index: 50; box-shadow: 0 2px 8px rgba(0,0,0,0.15);">

@@ -753,8 +753,8 @@ if (actionDowngrade) actionDowngrade.addEventListener('click', e => {
   e.stopPropagation(); if (!currentActionTile) return; socket.emit('action',{roomId,type:'downgrade',payload:{x:currentActionTile.x,y:currentActionTile.y}},(res)=>{ if(res?.ok) flashTile(currentActionTile.x,currentActionTile.y,'#e74c3c'); }); hideActionButtons();
 });
 
-// Clicking outside should hide action buttons
-document.addEventListener('click', (e)=>{ if (!actionButtons) return; if (actionButtons.style.display==='none') return; if (!actionButtons.contains(e.target)) hideActionButtons(); });
+// Clicking outside should hide action buttons (but not on the canvas or action buttons themselves)
+document.addEventListener('click', (e)=>{ if (!actionButtons) return; if (actionButtons.style.display==='none') return; if (!actionButtons.contains(e.target) && !canvas.contains(e.target)) hideActionButtons(); });
 
 // Show camera controls on touch-capable devices
 const camControls = document.getElementById('camControls');
