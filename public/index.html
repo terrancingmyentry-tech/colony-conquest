@@ -21,6 +21,24 @@
     input[type=color] { width: 40px; height: 24px; padding:0; border:none; vertical-align:middle; }
     .tileCoord { position:absolute; background:white; color:black; font-size:10px; padding:0 2px; pointer-events:none; z-index:10; border-radius:2px; }
     #mapContainer { position:relative; display:inline-block; overflow:hidden; }
+    /* Action buttons (upgrade/downgrade) overlay */
+    .action-buttons { position: absolute; z-index: 60; display: flex; align-items: center; pointer-events: auto; }
+    .action-buttons button { width: 40px; height: 40px; border-radius: 6px; border: none; font-weight: bold; box-shadow: 0 2px 6px rgba(0,0,0,0.25); }
+    .action-downgrade { margin-right: 8px; background: #e74c3c; color: #fff; }
+    .action-upgrade { margin-left: 8px; background: #2ecc71; color: #fff; }
+
+    /* On-screen camera arrows for touch devices */
+    .cam-controls { position: absolute; right: 8px; bottom: 8px; z-index: 55; display: grid; grid-template-columns: 44px 44px 44px; grid-template-rows: 44px 44px; gap:6px; }
+    .cam-controls button { width:44px;height:44px;border-radius:6px;border:none;background:rgba(0,0,0,0.4);color:#fff;font-size:18px; }
+
+    /* Responsive layout: make map fill available width on small screens */
+    @media (max-width: 900px) {
+      #gameUI { padding: 8px; }
+      #mapContainer { width: calc(100vw - 40px); height: calc(100vw - 40px); }
+      canvas { width: 100% !important; height: 100% !important; }
+      #chatPanel, #guidePanel { display: none; }
+      #mapContainer { margin: 0 auto; }
+    }
     #gameUI { display:none; padding: 10px; }
     .advancedOptions { display: none; margin-top: 10px; padding: 6px; background: #f0f0f0; }
     .advancedOptions.show { display: block; }
@@ -146,6 +164,16 @@
     <div style="display: flex; gap: 20px; align-items: flex-start;">
       <div id="mapContainer" style="width:600px;height:600px;position:relative;">
         <canvas id="canvas" width="600" height="600"></canvas>
+        <!-- Action buttons injected by client for upgrade/downgrade -->
+        <div id="actionButtons" class="action-buttons" style="display:none;">
+          <button id="actionDowngrade" class="action-downgrade">−</button>
+          <button id="actionUpgrade" class="action-upgrade">＋</button>
+        </div>
+        <!-- Camera controls for touch devices -->
+        <div id="camControls" class="cam-controls" style="display:none;">
+          <div></div><button id="camUp">↑</button><div></div>
+          <button id="camLeft">←</button><button id="camDown">↓</button><button id="camRight">→</button>
+        </div>
       </div>
       
       <div id="chatPanel" style="width: 250px; height: 600px; background: #fff; border: 2px solid #34495e; border-radius: 4px; display: flex; flex-direction: column; z-index: 50; box-shadow: 0 2px 8px rgba(0,0,0,0.15);">

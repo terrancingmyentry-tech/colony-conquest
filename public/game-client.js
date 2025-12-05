@@ -720,6 +720,60 @@ function resetTurnTimer() {
 // Canvas input
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
+// Action buttons UI (upgrade/downgrade)
+const actionButtons = document.getElementById('actionButtons');
+const actionUpgrade = document.getElementById('actionUpgrade');
+const actionDowngrade = document.getElementById('actionDowngrade');
+let actionHideTimer = null;
+let currentActionTile = null; // {x,y}
+
+function showActionButtonsScreen(px, py, gridX, gridY) {
+  if (!actionButtons) return;
+  actionButtons.style.left = (px - 60) + 'px';
+  actionButtons.style.top = (py - 28) + 'px';
+  actionButtons.style.display = 'flex';
+  currentActionTile = { x: gridX, y: gridY };
+  // reset timer
+  if (actionHideTimer) clearTimeout(actionHideTimer);
+  actionHideTimer = setTimeout(hideActionButtons, 5000);
+}
+
+function hideActionButtons() {
+  if (!actionButtons) return;
+  actionButtons.style.display = 'none';
+  currentActionTile = null;
+  if (actionHideTimer) { clearTimeout(actionHideTimer); actionHideTimer = null; }
+}
+
+// Tap/click on the action buttons
+if (actionUpgrade) actionUpgrade.addEventListener('click', e => {
+  e.stopPropagation(); if (!currentActionTile) return; socket.emit('action',{roomId,type:'upgrade',payload:{x:currentActionTile.x,y:currentActionTile.y}},(res)=>{ if(res?.ok) flashTile(currentActionTile.x,currentActionTile.y,'#2ecc71'); }); hideActionButtons();
+});
+if (actionDowngrade) actionDowngrade.addEventListener('click', e => {
+  e.stopPropagation(); if (!currentActionTile) return; socket.emit('action',{roomId,type:'downgrade',payload:{x:currentActionTile.x,y:currentActionTile.y}},(res)=>{ if(res?.ok) flashTile(currentActionTile.x,currentActionTile.y,'#e74c3c'); }); hideActionButtons();
+});
+
+// Clicking outside should hide action buttons
+document.addEventListener('click', (e)=>{ if (!actionButtons) return; if (actionButtons.style.display==='none') return; if (!actionButtons.contains(e.target)) hideActionButtons(); });
+
+// Show camera controls on touch-capable devices
+const camControls = document.getElementById('camControls');
+const isTouch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+if (isTouch && camControls) camControls.style.display = 'grid';
+// map keyboard emulation via cam controls
+const camUpBtn = document.getElementById('camUp');
+const camDownBtn = document.getElementById('camDown');
+const camLeftBtn = document.getElementById('camLeft');
+const camRightBtn = document.getElementById('camRight');
+if (camUpBtn) camUpBtn.addEventListener('touchstart', ()=>{ keys.ArrowUp = true; });
+if (camUpBtn) camUpBtn.addEventListener('touchend', ()=>{ keys.ArrowUp = false; });
+if (camDownBtn) camDownBtn.addEventListener('touchstart', ()=>{ keys.ArrowDown = true; });
+if (camDownBtn) camDownBtn.addEventListener('touchend', ()=>{ keys.ArrowDown = false; });
+if (camLeftBtn) camLeftBtn.addEventListener('touchstart', ()=>{ keys.ArrowLeft = true; });
+if (camLeftBtn) camLeftBtn.addEventListener('touchend', ()=>{ keys.ArrowLeft = false; });
+if (camRightBtn) camRightBtn.addEventListener('touchstart', ()=>{ keys.ArrowRight = true; });
+if (camRightBtn) camRightBtn.addEventListener('touchend', ()=>{ keys.ArrowRight = false; });
+
 function showTransientPopup(px, py, text, ms=2000){
   const popup = document.createElement('div');
   popup.style.position='absolute';
@@ -776,8 +830,14 @@ canvas.addEventListener('mousedown', (ev)=>{
   if(!cell || cell.type!=='unit') return;
 
   if(cell.pid===pid){
-    if(ev.button===0) socket.emit('action',{roomId,type:'upgrade',payload:{x,y}},(res)=>{if(res?.ok) flashTile(x,y,'#2ecc71');});
-    if(ev.button===2) socket.emit('action',{roomId,type:'downgrade',payload:{x,y}},(res)=>{if(res?.ok) flashTile(x,y,'#e74c3c');});
+    // Left click should display action buttons (upgrade on right, downgrade on left)
+    if(ev.button===0){
+      const rect = canvas.getBoundingClientRect();
+      const px = ev.clientX - rect.left; const py = ev.clientY - rect.top;
+      showActionButtonsScreen(px, py, x, y);
+      return;
+    }
+    // Ignore right-click entirely (we disabled contextmenu)
   } else {
     if(ev.button===0){
       const owner = state.playersMeta[cell.pid]?.name||`Player ${cell.pid}`;
@@ -786,6 +846,23 @@ canvas.addEventListener('mousedown', (ev)=>{
     }
   }
 });
+
+// Touch support: tap behaves like left click
+canvas.addEventListener('touchstart', (tev)=>{
+  tev.preventDefault();
+  const touch = tev.touches[0];
+  const rect = canvas.getBoundingClientRect();
+  const tSize = baseTile((state && state.size) ? state.size : 10)*zoom;
+  const mapX = (touch.clientX - rect.left) / tSize + offsetX;
+  const mapY = (touch.clientY - rect.top) / tSize + offsetY;
+  const x = Math.floor(mapX), y = Math.floor(mapY);
+  if(!state) return; if(x<0||y<0||x>=state.size||y>=state.size) return;
+  const activePid = state.turnOrder[state.activeIndex];
+  if(state.startersToPlace && activePid===pid){ socket.emit('action',{roomId,type:'placeStarter',payload:{x,y}}); return; }
+  const cell = state.grid[y][x]; if(!cell || cell.type!=='unit') return;
+  if(cell.pid===pid){ const rectC = canvas.getBoundingClientRect(); const px = touch.clientX - rectC.left; const py = touch.clientY - rectC.top; showActionButtonsScreen(px, py, x, y); }
+  else { const owner = state.playersMeta[cell.pid]?.name||`Player ${cell.pid}`; const r = canvas.getBoundingClientRect(); showTransientPopup(touch.clientX-r.left+8, touch.clientY-r.top+8, `Owner: ${owner}`); }
+}, { passive: false });
 
 // Camera pan
 const keys = {ArrowUp:false,ArrowDown:false,ArrowLeft:false,ArrowRight:false};
