@@ -830,14 +830,27 @@ canvas.addEventListener('mousedown', (ev)=>{
   if(!cell || cell.type!=='unit') return;
 
   if(cell.pid===pid){
-    // Left click should display action buttons (upgrade on right, downgrade on left)
-    if(ev.button===0){
-      const rect = canvas.getBoundingClientRect();
-      const px = ev.clientX - rect.left; const py = ev.clientY - rect.top;
-      showActionButtonsScreen(px, py, x, y);
-      return;
+    // For touch devices: show the on-screen action buttons (tap behavior)
+    if(isTouch){
+      if(ev.button===0){
+        const rect = canvas.getBoundingClientRect();
+        const px = ev.clientX - rect.left; const py = ev.clientY - rect.top;
+        showActionButtonsScreen(px, py, x, y);
+        return;
+      }
+      // ignore right-click on touch devices
+    } else {
+      // On non-touch (PC/laptop): perform actions directly with mouse buttons
+      // Left-click = upgrade, Right-click = downgrade
+      if(ev.button===0){
+        socket.emit('action',{roomId,type:'upgrade',payload:{x,y}},(res)=>{ if(res?.ok) flashTile(x,y,'#2ecc71'); });
+        return;
+      }
+      if(ev.button===2){
+        socket.emit('action',{roomId,type:'downgrade',payload:{x,y}},(res)=>{ if(res?.ok) flashTile(x,y,'#e74c3c'); });
+        return;
+      }
     }
-    // Ignore right-click entirely (we disabled contextmenu)
   } else {
     if(ev.button===0){
       const owner = state.playersMeta[cell.pid]?.name||`Player ${cell.pid}`;
@@ -1146,15 +1159,7 @@ function draw(){
 
       if(cell?.type==='unit') drawUnit(px,py,tSize,cell,state.playersMeta[cell.pid]?.color||'#666');
 
-      // coordinate box top-right
-      const coordText = tileLabel(x,y);
-      const boxSize = Math.min(28, tSize*0.35);
-      ctx.fillStyle='rgba(255,255,255,0.95)';
-      ctx.fillRect(px+tSize-boxSize-2, py+2, boxSize, boxSize);
-      ctx.strokeStyle='#000'; ctx.lineWidth=1;
-      ctx.strokeRect(px+tSize-boxSize-2, py+2, boxSize, boxSize);
-      ctx.fillStyle='#000'; ctx.font=`bold ${Math.floor(boxSize*0.55)}px Arial`; ctx.textAlign='center'; ctx.textBaseline='middle';
-      ctx.fillText(coordText, px+tSize-boxSize/2-2, py+boxSize/2+2);
+      
     }
   }
 
