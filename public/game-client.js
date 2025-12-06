@@ -244,9 +244,10 @@ function loadTextures() {
     customTextures.obstacleVariants[0] = await loadOne(files.obstacle1);
     customTextures.obstacleVariants[1] = await loadOne(files.obstacle2);
     customTextures.obstacleVariants[2] = await loadOne(files.obstacle3);
-    customTextures.unitLevels[0] = await loadOne(files.unit1);
-    customTextures.unitLevels[1] = await loadOne(files.unit2);
-    customTextures.unitLevels[2] = await loadOne(files.unit3);
+    // Unit textures disabled: units are rendered via canvas shapes now
+    customTextures.unitLevels[0] = null;
+    customTextures.unitLevels[1] = null;
+    customTextures.unitLevels[2] = null;
     console.log('? All textures loaded');
     if (texturesLoadedResolve) texturesLoadedResolve(true);
     draw();
@@ -910,28 +911,59 @@ function drawUnit(px,py,tileSize,c,color){
   ctx.fillStyle = color;
   ctx.arc(cx, cy, colorCircleRadius, 0, Math.PI*2);
   ctx.fill();
-  
-  // Draw unit texture if available
-  let unitTexture = null;
-  if (customTextures.unitLevels && c.level >= 1 && c.level <= 3) {
-    unitTexture = customTextures.unitLevels[c.level - 1];
-  }
-  
-  if (unitTexture && unitTexture.complete && unitTexture.naturalWidth) {
-    // Draw unit texture centered on tile
-    const unitSize = tileSize * 0.72;
-    try {
-      ctx.drawImage(unitTexture, cx - unitSize/2, cy - unitSize/2, unitSize, unitSize);
-    } catch(e) {
-      console.warn('Error drawing unit texture:', e);
-    }
-  } else {
-    // Fallback: draw simple dot representation
+  // Draw unit appearance using canvas shapes (no textures)
+  ctx.save();
+  ctx.translate(cx, cy);
+  // Foreground color for shapes (contrast with base color)
+  const fg = getContrastOutline(color) || '#fff';
+  ctx.fillStyle = fg;
+  ctx.strokeStyle = fg;
+  ctx.lineWidth = Math.max(1, tileSize * 0.04);
+
+  const lvl = Math.max(1, Math.min(3, Number(c.level) || 1));
+  if (lvl === 1) {
+    // Level 1: small filled circle in center
+    const r = tileSize * 0.12;
     ctx.beginPath();
-    ctx.fillStyle = '#ffffff';
-    ctx.arc(cx, cy, tileSize * 0.12, 0, Math.PI * 2);
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (lvl === 2) {
+    // Level 2: shield-like diamond with small inner accent
+    const w = tileSize * 0.34, h = tileSize * 0.34;
+    ctx.beginPath();
+    ctx.moveTo(0, -h/2);
+    ctx.lineTo(w/2, 0 - h/8);
+    ctx.lineTo(w/4, h/2);
+    ctx.lineTo(-w/4, h/2);
+    ctx.lineTo(-w/2, 0 - h/8);
+    ctx.closePath();
+    ctx.fill();
+    // inner accent circle
+    ctx.fillStyle = lightenColor(color, 0.15);
+    ctx.beginPath();
+    ctx.arc(0, -h*0.06, tileSize * 0.08, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    // Level 3: star / crown emblem
+    const outer = tileSize * 0.33;
+    const inner = outer * 0.45;
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const angle = -Math.PI / 2 + i * Math.PI / 5;
+      const r = (i % 2 === 0) ? outer : inner;
+      const xpt = Math.cos(angle) * r;
+      const ypt = Math.sin(angle) * r;
+      if (i === 0) ctx.moveTo(xpt, ypt); else ctx.lineTo(xpt, ypt);
+    }
+    ctx.closePath();
+    ctx.fill();
+    // small center highlight
+    ctx.fillStyle = lightenColor(color, 0.25);
+    ctx.beginPath();
+    ctx.arc(0, 0, tileSize * 0.07, 0, Math.PI * 2);
     ctx.fill();
   }
+  ctx.restore();
 }
 
 // Leaderboard
