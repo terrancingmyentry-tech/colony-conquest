@@ -1,0 +1,23 @@
+FRIENDLY UNIT BLOCK (line 440):
+    if (target.pid===ownerPid) {
+      // Chain reaction: only if target is ALREADY L3, trigger activation
+      if (target.level === 3) {
+        console.log(`Chain: recursive activate at ${nx},${ny} triggered by ${x},${y}`);
+        activateTile(st, nx, ny, ownerPid, hitTracker, config);
+      } else {
+        // L1 or L2: just level up, no chain
+        target.level++;
+      }
+    } else {
+
+ENEMY UNIT BLOCK (line 458):
+      target.pid = ownerPid;
+      // Chain reaction: only if captured unit WAS L3, trigger activation (now our L3)
+      if (target.level === 3) {
+        console.log(`Chain: captured L3 at ${nx},${ny} activated by conversion from ${x},${y}`);
+        activateTile(st, nx, ny, ownerPid, hitTracker, config);
+      } else {
+        // L1 or L2: just level up after capture, no chain
+        target.level++;
+      }
+    }
