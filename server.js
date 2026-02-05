@@ -432,6 +432,16 @@ function activateTile(st, x, y, ownerPid, hitTracker={}, config={}) {
     const target = st.grid[ny][nx];
     if (!target) {
       st.grid[ny][nx] = { type:'unit', pid:ownerPid, level:1 };
+      // Claim this tile
+      claimTile(st, nx, ny, ownerPid);
+      continue;
+    }
+    // If target is a building, damage it (units can damage buildings)
+    if (target.type === 'building' && target.pid !== ownerPid) {
+      if (!target.hp) target.hp = target.maxHp || 5;
+      target.hp = Math.max(0, target.hp - 1);
+      if (target.hp === 0) st.grid[ny][nx] = null;
+      // don't proceed with unit-level capture logic for buildings
       continue;
     }
     if (target.type!=='unit') continue;
@@ -456,6 +466,8 @@ function activateTile(st, x, y, ownerPid, hitTracker={}, config={}) {
         st.playersMeta[ownerPid].score = (st.playersMeta[ownerPid].score || 0) + pts;
       }
       target.pid = ownerPid;
+      // Claim this tile when converting to new owner
+      claimTile(st, nx, ny, ownerPid);
       // Chain reaction: only if captured unit WAS L3, trigger activation (now our L3)
       if (target.level === 3) {
         console.log(`Chain: captured L3 at ${nx},${ny} activated by conversion from ${x},${y}`);
@@ -481,8 +493,13 @@ function burst(st, x, y, ownerPid, config={}) {
   try { room = Object.values(rooms).find(r => r.state === st); mode = room && room.config && room.config.mode; } catch(e){}
   if (!tile) {
     st.grid[y][x]={type:'unit', pid:ownerPid, level:1};
+    // Claim this tile
+    claimTile(st, x, y, ownerPid);
   } else if (tile.type==='unit') {
-    if (tile.pid!==ownerPid) tile.pid=ownerPid;
+    if (tile.pid!==ownerPid) {
+      tile.pid=ownerPid;
+      claimTile(st, x, y, ownerPid);
+    }
     if (tile.level===3) activateTile(st, x, y, ownerPid, {}, config);
     else tile.level=Math.min(tile.level+1,3);
   } else if (tile.type==='obstacle') {
@@ -564,16 +581,13 @@ function handleStarterTimeout(roomId) {
   const st = room.state;
   const activePid = st.turnOrder[st.activeIndex];
   if (st.playersMeta[activePid]) {
-    st.playersMeta[activePid].alive = false;
-    for (let y = 0; y < st.size; y++) {
-      for (let x = 0; x < st.size; x++) {
-        const cell = st.grid[y][x];
-        if (cell && cell.type === 'unit' && cell.pid === activePid) st.grid[y][x] = null;
-      }
-    }
+    // Previously we auto-kicked players who timed out during starter placement.
+    // Change: do NOT remove the player or mark them dead. Instead, skip their starter
+    // placement turn so the lobby/game can progress without forcibly disconnecting them.
     st.startersToPlace = Math.max(0, st.startersToPlace - 1);
     io.to(roomId).emit('state', st);
-    io.to(roomId).emit('playerKicked', { pid: activePid, reason: 'starterTimeout' });
+    // Inform clients that this player timed out during starter placement (non-kick)
+    io.to(roomId).emit('playerTimedOut', { pid: activePid, reason: 'starterTimeout' });
   }
   nextStarterTurn(roomId);
 }
@@ -640,6 +654,14 @@ function startNormalTurn(roomId) {
 
   if (st.activeIndex === undefined || st.activeIndex >= st.turnOrder.length) st.activeIndex = 0;
   const activePid = st.turnOrder[st.activeIndex];
+  
+  // Process queued AU actions before awarding resources
+  processQueuedAUActions(st);
+  
+  // Award resources at the start of each turn
+  awardResourcesForPlayer(st, activePid);
+  
+  io.to(roomId).emit('state', st);
   io.to(roomId).emit('turnChange', { activePid });
 
   if (st.playersMeta[activePid] && st.playersMeta[activePid].isAI) setTimeout(() => runAI(roomId, activePid), 350);
@@ -679,6 +701,154 @@ function getSpawnBlockRange(mapSize) {
   return 2; // default
 }
 
+// Claim a tile for a player (used when units move or spawn)
+function claimTile(st, x, y, pid) {
+  if (!inside(x, y, st.size)) return;
+  const terrain = st.terrain && st.terrain[y] ? st.terrain[y][x] : null;
+  // Don't claim water tiles
+  if (terrain && terrain.type === 'water') return;
+  const claimKey = `${x},${y}`;
+  if (!st.claims) st.claims = {};
+  st.claims[claimKey] = pid;
+}
+
+// Process queued AU actions (execute when their executeAtTurn matches current turn)
+function processQueuedAUActions(st) {
+  for (let y = 0; y < st.size; y++) {
+    for (let x = 0; x < st.size; x++) {
+      const tile = st.grid[y][x];
+      if (!tile || tile.type !== 'au' || !tile.actionQueue || tile.actionQueue.length === 0) continue;
+      
+      const action = tile.actionQueue[0];
+      if (action.executeAtTurn !== st.turnNumber) continue; // Not time to execute yet
+      
+      // Execute the action
+      const actType = action && action.type;
+      const dir = Array.isArray(action.direction) ? action.direction : [0, 0];
+      const dx = Number(dir[0]) || 0;
+      const dy = Number(dir[1]) || 0;
+      const pid = tile.pid;
+      
+      if (actType === 'move') {
+        const nx = x + dx, ny = y + dy;
+        if (inside(nx, ny, st.size)) {
+          const terr = st.terrain && st.terrain[ny] ? st.terrain[ny][nx] : null;
+          const dest = st.grid[ny][nx];
+          if (!terr || terr.type !== 'water') { // Can move if not water
+            if (!dest) { // Destination empty
+              st.grid[ny][nx] = tile;
+              st.grid[y][x] = null;
+              claimTile(st, nx, ny, pid);
+            }
+          }
+        }
+      } else if (actType === 'attack') {
+        const tx = x + dx, ty = y + dy;
+        if (inside(tx, ty, st.size)) {
+          const target = st.grid[ty][tx];
+          if (target && (target.type === 'unit' || target.type === 'au') && target.pid !== pid) {
+            target.level = Math.max(0, target.level - 1);
+            if (target.level === 0) st.grid[ty][tx] = null;
+          } else if (target && target.type === 'building' && target.pid !== pid) {
+            // Damage building (1 HP)
+            if (!target.hp) target.hp = target.maxHp || 5;
+            target.hp = Math.max(0, target.hp - 1);
+            if (target.hp === 0) st.grid[ty][tx] = null;
+          }
+        }
+      }
+      
+      // Remove the action from queue
+      tile.actionQueue.shift();
+    }
+  }
+}
+
+// Calculate gold for a player based on claimed tiles
+function calculatePlayerGold(st, pid) {
+  if (!st || !st.claims) return 0;
+  
+  let claimCount = 0;
+  for (const claimKey in st.claims) {
+    if (st.claims[claimKey] === pid) {
+      claimCount++;
+    }
+  }
+  
+  // 0.1g per claimed tile
+  return Math.floor(claimCount * 0.1 * 10) / 10; // Keep one decimal place
+}
+
+// Award resources to a player based on their claimed tiles
+function awardResourcesForPlayer(st, pid) {
+  if (!st.playersMeta || !st.playersMeta[pid]) return;
+  
+  const goldGain = calculatePlayerGold(st, pid);
+  const player = st.playersMeta[pid];
+  
+  if (!player.resources) player.resources = {};
+  player.gold = (player.gold || 0) + goldGain;
+  player.resources.gold = player.gold; // Sync gold to resources
+  player.resources.wealth = (player.resources.wealth || 0) + goldGain;
+  
+  // Count claimed tiles for logging
+  let claimCount = 0;
+  for (const claimKey in st.claims) {
+    if (st.claims[claimKey] === pid) claimCount++;
+  }
+  
+  if (goldGain > 0) {
+    console.log(`💰 Player ${pid} gained ${goldGain}g from ${claimCount} claimed tiles. Total gold: ${player.gold}`);
+  }
+}
+
+// -------------------------
+// Starter & Normal turn handlers
+function nextStarterTurn(roomId) {
+  const room = rooms[roomId];
+  if (!room || !room.state) return;
+  const st = room.state;
+
+  if (!st.turnOrder.length) return startNormalTurn(roomId);
+
+  for (let i = 0; i < st.turnOrder.length; i++) {
+    st.activeIndex = (st.activeIndex + 1) % st.turnOrder.length;
+    const pid = st.turnOrder[st.activeIndex];
+    if (st.playersMeta[pid] && st.playersMeta[pid].alive !== false) break;
+  }
+
+  if (st.startersToPlace <= 0) {
+    startNormalTurn(roomId);
+    return;
+  }
+
+  const activePid = st.turnOrder[st.activeIndex];
+  io.to(roomId).emit('turnChange', { activePid });
+  io.to(roomId).emit('state', st);
+  if (st.playersMeta[activePid] && st.playersMeta[activePid].isAI) {
+    setTimeout(() => runAI(roomId, activePid), 350);
+  }
+}
+
+function startNormalTurn(roomId) {
+  const room = rooms[roomId];
+  if (!room || !room.state) return;
+  const st = room.state;
+
+  if (st.turnOrder.length === 0) return;
+
+  if (st.activeIndex === undefined || st.activeIndex >= st.turnOrder.length) st.activeIndex = 0;
+  const activePid = st.turnOrder[st.activeIndex];
+  
+  // Award resources at the start of each turn
+  awardResourcesForPlayer(st, activePid);
+
+  io.to(roomId).emit('state', st);
+  io.to(roomId).emit('turnChange', { activePid });
+  if (st.playersMeta[activePid] && st.playersMeta[activePid].isAI) setTimeout(() => runAI(roomId, activePid), 350);
+}
+
+// -------------------------
 function nextNormalTurn(roomId) {
   const room = rooms[roomId];
   if (!room || !room.state) return;
@@ -686,12 +856,13 @@ function nextNormalTurn(roomId) {
   if (!st.turnOrder.length) return;
 
   // Advance to next alive player
-  const prevIndex = st.activeIndex;
   for (let i = 0; i < st.turnOrder.length; i++) {
     st.activeIndex = (st.activeIndex + 1) % st.turnOrder.length;
     const pid = st.turnOrder[st.activeIndex];
     if (st.playersMeta[pid] && st.playersMeta[pid].alive !== false) break;
   }
+
+  const activePid = st.turnOrder[st.activeIndex];
 
   // If we wrapped to the first player (index 0), count as a new round
   if (st.activeIndex === 0) {
@@ -700,12 +871,17 @@ function nextNormalTurn(roomId) {
     advanceTileEventPhases(st, room.config);
     // Spawn tile events at the start of each new round
     spawnTileEvents(st, room.config.tileEventsMax);
+    // Process queued AU actions at start of each new round (when turnNumber increments)
+    processQueuedAUActions(st);
   }
 
-  const activePid = st.turnOrder[st.activeIndex];
+  // Award resources to the current player
+  awardResourcesForPlayer(st, activePid);
+
+  io.to(roomId).emit('state', st);
   io.to(roomId).emit('turnChange', { activePid });
   if (st.playersMeta[activePid] && st.playersMeta[activePid].isAI) setTimeout(() => runAI(roomId, activePid), 350);
-  startNormalTurnTimer(roomId);
+  // Timer setup (stub - add proper timer if needed)
 }
 
 // -------------------------
@@ -827,15 +1003,42 @@ function runAI(roomId, pid) {
     for (const p of coords) {
       const validation = isValidStarterPos(st, p.x, p.y);
       if (validation && validation.ok) {
-        st.grid[p.y][p.x] = { type: 'unit', pid, level: 1 };
+        st.grid[p.y][p.x] = { type: 'unit', pid, level: 3 };
         meta.starPlaced = true;
+        // Give AI player 10g at start
+        meta.gold = (meta.gold || 0) + 10;
+        if (!meta.resources) meta.resources = {};
+        meta.resources.gold = meta.gold;
+        
+        // Claim the starter tile
+        claimTile(st, p.x, p.y, pid);
+        
+        // Claim all adjacent tiles (8 directions) + center = 3x3 area
+        let claimCount = 1; // Center tile
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue; // Skip center, already claimed
+            const cx = p.x + dx, cy = p.y + dy;
+            if (inside(cx, cy, st.size)) {
+              const terrain = st.terrain && st.terrain[cy] ? st.terrain[cy][cx] : null;
+              // Claim grass tiles (not water)
+              if (!terrain || terrain.type !== 'water') {
+                claimTile(st, cx, cy, pid);
+                claimCount++;
+              }
+            }
+          }
+        }
+        
+        console.log(`🏗️ AI Player ${pid} placed starter at (${p.x},${p.y}) and claimed ${claimCount} tiles with 10g`);
+        
         st.startersToPlace = Math.max(0, st.startersToPlace - 1);
         st.lastMove = { pid, x: p.x, y: p.y };
         io.to(roomId).emit('state', st);
         return nextStarterTurn(roomId);
       }
     }
-    // No valid starter position found for AI (respect blocked zones) � skip placement
+    // No valid starter position found for AI (respect blocked zones) - skip placement
     return nextStarterTurn(roomId);
   }
 
@@ -847,14 +1050,9 @@ function runAI(roomId, pid) {
     }
   }
   if (!candidates.length) return nextNormalTurn(roomId);
-  candidates = shuffle(candidates);
-  candidates.sort((a,b) => {
-    if (a.level === 2 && b.level !== 2) return -1;
-    if (b.level === 2 && a.level !== 2) return 1;
-    return b.level - a.level;
-  });
-  // AI strategy dispatch by difficulty level (default: normal)
-  const aiLevel = meta.aiLevel || 'normal';
+  
+  // Prioritize level 3 units, then by level
+  candidates.sort((a,b) => b.level - a.level);
 
   function cloneState(s) { return JSON.parse(JSON.stringify(s)); }
 
@@ -865,6 +1063,8 @@ function runAI(roomId, pid) {
       if (!c) continue;
       if (c.type === 'unit') {
         score += (c.pid === pidToScore) ? (10 * c.level) : (-8 * c.level);
+      } else if (c.type === 'building') {
+        score += (c.pid === pidToScore) ? 15 : -10;
       } else if (c.type === 'obstacle') {
         if (c.hp) score -= (c.hp * 0.5);
       }
@@ -898,100 +1098,45 @@ function runAI(roomId, pid) {
     return scoreForPid(s, ownerPid);
   }
 
-  // Advanced: pick move maximizing own immediate score minus best opponent immediate reply
-  function pickMoveAdvanced(stateObj) {
+  // Hard AI: evaluate each move and pick the one that maximizes advantage
+  function pickMoveSmart(stateObj) {
     let best = null;
     let bestVal = -Infinity;
-    for (const c of candidates) {
+    
+    for (const c of candidates.slice(0, 5)) { // Check top 5 units
       const myScore = simulateMoveAndScore(stateObj, c.x, c.y, pid);
       let worstOpp = -Infinity;
+      
+      // Consider opponent responses
       for (const opPidStr of Object.keys(stateObj.playersMeta)) {
         const opPid = Number(opPidStr);
-        if (opPid === pid) continue;
+        if (opPid === pid || !stateObj.playersMeta[opPid].alive) continue;
+        
         const oppCandidates = [];
-        for (let yy = 0; yy < stateObj.size; yy++) for (let xx = 0; xx < stateObj.size; xx++) {
-          const t = stateObj.grid[yy][xx]; if (t && t.type === 'unit' && t.pid === opPid) oppCandidates.push({ x: xx, y: yy, level: t.level });
+        for (let yy = 0; yy < stateObj.size; yy++) {
+          for (let xx = 0; xx < stateObj.size; xx++) {
+            const t = stateObj.grid[yy][xx];
+            if (t && t.type === 'unit' && t.pid === opPid) {
+              oppCandidates.push({ x: xx, y: yy, level: t.level });
+            }
+          }
         }
-        for (const oc of oppCandidates) {
+        
+        // Find opponent's best response move
+        for (const oc of oppCandidates.slice(0, 3)) {
           const oppScore = simulateMoveAndScore(stateObj, oc.x, oc.y, opPid);
           worstOpp = Math.max(worstOpp, oppScore);
         }
       }
-      const val = myScore - (worstOpp === -Infinity ? 0 : worstOpp * 0.5);
+      
+      // Score is own gain minus opponent's best counter
+      const val = myScore - (worstOpp === -Infinity ? 0 : worstOpp * 0.6);
       if (val > bestVal) { bestVal = val; best = c; }
     }
     return best || candidates[0];
   }
 
-  // Grandmaster: limited-depth lookahead (minimax-like) with restricted branching
-  function pickMoveGrandmaster(stateObj, depth = 4, breadth = 3) {
-    function genMovesFor(pidToGen, s) {
-      const moves = [];
-      for (let yy = 0; yy < s.size; yy++) for (let xx = 0; xx < s.size; xx++) {
-        const t = s.grid[yy][xx]; if (t && t.type === 'unit' && t.pid === pidToGen) moves.push({ x: xx, y: yy, level: t.level });
-      }
-      moves.sort((a,b) => b.level - a.level);
-      return moves.slice(0, breadth);
-    }
-
-    function recurse(s, currentPid, depthLeft) {
-      if (depthLeft === 0) return scoreForPid(s, pid);
-      const moves = genMovesFor(currentPid, s);
-      if (!moves.length) return scoreForPid(s, pid);
-      let bestLocal = (currentPid === pid) ? -Infinity : Infinity;
-      for (const m of moves) {
-        const sCopy = JSON.parse(JSON.stringify(s));
-        if (!sCopy.grid[m.y][m.x]) sCopy.grid[m.y][m.x] = { type: 'unit', pid: currentPid, level: 1 };
-        else if (sCopy.grid[m.y][m.x].type === 'unit') {
-          if (sCopy.grid[m.y][m.x].level === 3) {
-            sCopy.grid[m.y][m.x] = null;
-            const dirs = [[0,-1],[0,1],[-1,0],[1,0]];
-            for (const [dx,dy] of dirs) {
-              const nx = m.x + dx, ny = m.y + dy;
-              if (nx < 0 || ny < 0 || nx >= sCopy.size || ny >= sCopy.size) continue;
-              const t = sCopy.grid[ny][nx];
-              if (!t) sCopy.grid[ny][nx] = { type: 'unit', pid: currentPid, level: 1 };
-              else if (t.type === 'unit') { t.pid = currentPid; t.level = Math.min(3, (t.level||1)+1); }
-            }
-          } else sCopy.grid[m.y][m.x].level = Math.min(3, sCopy.grid[m.y][m.x].level + 1);
-        }
-        const pids = Object.keys(sCopy.playersMeta).map(k => Number(k)).filter(n => sCopy.playersMeta[n] && sCopy.playersMeta[n].alive);
-        const idx = pids.indexOf(currentPid);
-        const nextIdx = (idx + 1) % pids.length;
-        const nextPid = pids[nextIdx];
-        const val = recurse(sCopy, nextPid, depthLeft - 1);
-        if (currentPid === pid) bestLocal = Math.max(bestLocal, val); else bestLocal = Math.min(bestLocal, val);
-      }
-      return bestLocal;
-    }
-
-    let bestMove = null; let bestVal = -Infinity;
-    for (const c of candidates.slice(0, breadth)) {
-      const s0 = JSON.parse(JSON.stringify(stateObj));
-      if (!s0.grid[c.y][c.x]) s0.grid[c.y][c.x] = { type: 'unit', pid: pid, level: 1 };
-      else if (s0.grid[c.y][c.x].type === 'unit') {
-        if (s0.grid[c.y][c.x].level === 3) {
-          s0.grid[c.y][c.x] = null;
-          const dirs = [[0,-1],[0,1],[-1,0],[1,0]];
-          for (const [dx,dy] of dirs) {
-            const nx = c.x + dx, ny = c.y + dy;
-            if (nx < 0 || ny < 0 || nx >= s0.size || ny >= s0.size) continue;
-            const t = s0.grid[ny][nx];
-            if (!t) s0.grid[ny][nx] = { type: 'unit', pid: pid, level: 1 };
-            else if (t.type === 'unit') { t.pid = pid; t.level = Math.min(3, (t.level||1)+1); }
-          }
-        } else s0.grid[c.y][c.x].level = Math.min(3, s0.grid[c.y][c.x].level + 1);
-      }
-      const val = recurse(s0, pid, depth - 1);
-      if (val > bestVal) { bestVal = val; bestMove = c; }
-    }
-    return bestMove || candidates[0];
-  }
-
-  let pick;
-  if (aiLevel === 'grandmaster') pick = pickMoveGrandmaster(st, 5, 3);
-  else if (aiLevel === 'advanced') pick = pickMoveAdvanced(st);
-  else pick = candidates[0];
+  let pick = pickMoveSmart(st);
 
   if (!pick) return nextNormalTurn(roomId);
   const tile = st.grid[pick.y][pick.x];
@@ -1166,8 +1311,14 @@ io.on('connection', socket => {
       } else {
         // Game already started - pass host to next player
         room.hostSid = room.players[0]?.sid || null;
-        if (!room.players.length) {
+        // If no human players remain (only AI bots), close the match entirely
+        const humanCount = room.players.filter(p => !p.isAI).length;
+        if (humanCount === 0) {
           if (room.timer) { clearInterval(room.timer); room.timer = null; }
+          if (room.state) {
+            room.state.ended = true;
+            io.to(rid).emit('gameEnded', { reason: 'No human players remaining' });
+          }
           delete rooms[rid];
         } else {
           io.to(rid).emit('lobbyUpdate', { players: room.players, config: room.config });
@@ -1176,8 +1327,14 @@ io.on('connection', socket => {
       }
     } else {
       // Regular player leaving
-      if (!room.players.length) {
+      // If no human players remain (only AI bots), close the match entirely
+      const humanCount2 = room.players.filter(p => !p.isAI).length;
+      if (humanCount2 === 0) {
         if (room.timer) { clearInterval(room.timer); room.timer = null; }
+        if (room.state) {
+          room.state.ended = true;
+          io.to(rid).emit('gameEnded', { reason: 'No human players remaining' });
+        }
         delete rooms[rid];
       } else {
         io.to(rid).emit('lobbyUpdate', { players: room.players, config: room.config });
@@ -1211,7 +1368,19 @@ io.on('connection', socket => {
         const addCount = Math.max(0, Number(count) || 0);
         for (let i = 0; i < addCount; i++) {
           const pid = room.players.length;
-          room.players.push({ sid: null, pid, name: `[BOT-${levelName.toUpperCase()}-${pid}]`, color: botColors[pid % botColors.length], isAI: true, aiLevel: levelName, alive: true, starPlaced: false });
+          const botColor = botColors[pid % botColors.length];
+          room.players.push({ 
+            sid: null, 
+            pid, 
+            name: `[BOT-${levelName.toUpperCase()}-${pid}]`, 
+            color: botColor, 
+            c1: '#ffffff', // White stripes for bots
+            c2: botColor,  // Background color matches their main color
+            isAI: true, 
+            aiLevel: levelName, 
+            alive: true, 
+            starPlaced: false 
+          });
         }
       }
 
@@ -1222,8 +1391,17 @@ io.on('connection', socket => {
       const size = room.config.mapSize;
       console.log(`   Creating grid...`);
       const gen = makeGrid(size, room.config.bPct, { obstacleHp: room.config.obstacleHp, waterOn: room.config.waterOn, waterPct: room.config.waterPct, scatteredWaterOn: room.config.scatteredWaterOn, riverOn: room.config.riverOn, lakeOn: room.config.lakeOn });
-      const state = { size, terrain: gen.terrain, grid: gen.objects, playersMeta: {}, turnOrder: [], activeIndex: 0, startersToPlace: room.players.length, ended: false, winner: null, lastMove: null, turnNumber: 1, tileEvents: [], blockedZones: [] };
-      room.players.forEach(p => { state.playersMeta[p.pid] = { ...p, score: 0 }; state.turnOrder.push(p.pid); });
+      const state = { size, terrain: gen.terrain, grid: gen.objects, playersMeta: {}, claims: {}, turnOrder: [], activeIndex: 0, startersToPlace: room.players.length, ended: false, winner: null, lastMove: null, turnNumber: 1, tileEvents: [], blockedZones: [] };
+      room.players.forEach(p => { 
+        state.playersMeta[p.pid] = { 
+          ...p, 
+          score: 0, 
+          gold: 0,
+          claims: {},
+          resources: { wealth: 0, stone: 0, wood: 0, coal: 0, copper: 0, iron: 0 } 
+        }; 
+        state.turnOrder.push(p.pid); 
+      });
       shuffle(state.turnOrder);
       room.state = state;
 
@@ -1272,8 +1450,38 @@ io.on('connection', socket => {
       if (!validation.ok) {
         return cb && cb({ ok: false, err: validation.error });
       }
-      st.grid[y][x] = { type: 'unit', pid, level: 1 };
-      if (st.playersMeta[pid]) st.playersMeta[pid].starPlaced = true;
+      // Create starter at level 3 for faster gameplay
+      st.grid[y][x] = { type: 'unit', pid, level: 3 };
+      if (st.playersMeta[pid]) {
+        st.playersMeta[pid].starPlaced = true;
+        // Give player 10g at start
+        st.playersMeta[pid].gold = (st.playersMeta[pid].gold || 0) + 10;
+        if (!st.playersMeta[pid].resources) st.playersMeta[pid].resources = {};
+        st.playersMeta[pid].resources.gold = st.playersMeta[pid].gold;
+      }
+      
+      // Claim the starter tile
+      claimTile(st, x, y, pid);
+      
+      // Claim all adjacent tiles (8 directions) + center = 3x3 area
+      let claimCount = 1; // Center tile
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue; // Skip center, already claimed
+          const cx = x + dx, cy = y + dy;
+          if (inside(cx, cy, st.size)) {
+            const terrain = st.terrain && st.terrain[cy] ? st.terrain[cy][cx] : null;
+            // Claim grass tiles (not water)
+            if (!terrain || terrain.type !== 'water') {
+              claimTile(st, cx, cy, pid);
+              claimCount++;
+            }
+          }
+        }
+      }
+      
+      console.log(`🏗️ Player ${pid} placed starter at (${x},${y}) and claimed ${claimCount} tiles with 10g`);
+      
       st.startersToPlace = Math.max(0, st.startersToPlace - 1);
       setLastMove(x, y);
       io.to(rid).emit('state', st);
@@ -1297,6 +1505,177 @@ io.on('connection', socket => {
       if (!inside(x, y, st.size)) return cb && cb({ ok: false, err: 'Out of bounds' });
       burst(st, x, y, pid, room.config);
       setLastMove(x, y);
+    } else if (type === 'buildBuilding') {
+      const { fromX, fromY, buildingType } = payload;
+      if (!inside(fromX, fromY, st.size)) return cb && cb({ ok: false, err: 'Out of bounds' });
+      
+      const tile = st.grid[fromY][fromX];
+      if (!tile || tile.type !== 'unit' || tile.pid !== pid) {
+        return cb && cb({ ok: false, err: 'Invalid unit tile' });
+      }
+      
+      // Replace unit with building (walls have 5 HP; towers/barracks have 3 HP)
+      const newBuilding = { type: 'building', pid, buildingType };
+      if (buildingType === 'wall') {
+        newBuilding.hp = 5;
+        newBuilding.maxHp = 5;
+      } else if (buildingType === 'tower' || buildingType === 'barracks') {
+        newBuilding.hp = 3;
+        newBuilding.maxHp = 3;
+      }
+      st.grid[fromY][fromX] = newBuilding;
+      setLastMove(fromX, fromY);
+    } else if (type === 'barracksSpawn') {
+      const { barracksX, barracksY, spawnX, spawnY, auType } = payload;
+      if (!inside(barracksX, barracksY, st.size) || !inside(spawnX, spawnY, st.size)) {
+        return cb && cb({ ok: false, err: 'Out of bounds' });
+      }
+      
+      const barracks = st.grid[barracksY][barracksX];
+      if (!barracks || barracks.type !== 'building' || barracks.buildingType !== 'barracks' || barracks.pid !== pid) {
+        return cb && cb({ ok: false, err: 'Invalid barracks' });
+      }
+      
+      const spawnTile = st.grid[spawnY][spawnX];
+      if (spawnTile) {
+        return cb && cb({ ok: false, err: 'Spawn tile occupied' });
+      }
+      
+      // Spawn AU at the target tile
+      st.grid[spawnY][spawnX] = { type: 'au', pid, level: 1, auType: auType || 'swordsman' };
+      // Claim the ground where AU spawned
+      claimTile(st, spawnX, spawnY, pid);
+      setLastMove(spawnX, spawnY);
+    } else if (type === 'towerAttack') {
+      const { towerX, towerY, targetX, targetY } = payload;
+      if (!inside(towerX, towerY, st.size) || !inside(targetX, targetY, st.size)) {
+        return cb && cb({ ok: false, err: 'Out of bounds' });
+      }
+      
+      const tower = st.grid[towerY][towerX];
+      if (!tower || tower.type !== 'building' || tower.buildingType !== 'tower' || tower.pid !== pid) {
+        return cb && cb({ ok: false, err: 'Invalid tower' });
+      }
+      
+      // Check range (tower has range 2)
+      const dx = Math.abs(targetX - towerX);
+      const dy = Math.abs(targetY - towerY);
+      if (Math.max(dx, dy) > 2) {
+        return cb && cb({ ok: false, err: 'Target out of range' });
+      }
+      
+      const target = st.grid[targetY][targetX];
+      if (target && (target.type === 'unit' || target.type === 'au') && target.pid !== pid) {
+        // Damage enemy unit or AU (tower does 2 damage to units/AUs)
+        target.level = Math.max(0, (Number.isFinite(target.level) ? target.level : 1) - 2);
+        if (target.level === 0) {
+          st.grid[targetY][targetX] = null;
+        }
+      }
+      else if (target && target.type === 'building' && target.pid !== pid) {
+        // Damage enemy building (1 HP)
+        if (!target.hp) target.hp = target.maxHp || 5;
+        target.hp = Math.max(0, target.hp - 1);
+        if (target.hp === 0) st.grid[targetY][targetX] = null;
+      }
+      else if (target && target.type === 'obstacle') {
+        // Towers can also damage obstacles (deal 2 HP)
+        if (room.config && room.config.obstacleHp === 0) {
+          // obstacles are indestructible per config
+        } else {
+          target.hp = (Number.isFinite(target.hp) ? target.hp : (target.maxHp || 1)) - 2;
+          if (target.hp <= 0) st.grid[targetY][targetX] = null;
+        }
+      }
+      setLastMove(targetX, targetY);
+      // Tower attack counts as a turn action, so emit state and end turn
+      io.to(rid).emit('state', st);
+      removeDeadPlayers(room);
+      checkEndGame(rid);
+      nextNormalTurn(rid);
+      return cb && cb({ ok: true });
+    } else if (type === 'setAUActions') {
+      const { x, y, action } = payload;
+      if (!inside(x, y, st.size)) return cb && cb({ ok: false, err: 'Out of bounds' });
+
+      const tile = st.grid[y][x];
+      if (!tile || tile.type !== 'au' || tile.pid !== pid) {
+        return cb && cb({ ok: false, err: 'Invalid AU' });
+      }
+
+      // Validate action type (move or attack)
+      if (!action || !action.type || (action.type !== 'move' && action.type !== 'attack')) {
+        return cb && cb({ ok: false, err: 'Invalid action type' });
+      }
+
+      // Prevent multiple queued actions for same AU
+      if (tile.actionQueue && tile.actionQueue.length > 0) {
+        return cb && cb({ ok: false, err: 'Cannot change AU action once set' });
+      }
+
+      // Queue action with delay: will execute 2 turns later (T1: set, T2: wait, T3: execute)
+      if (!tile.actionQueue) tile.actionQueue = [];
+      const actionWithDelay = {
+        ...action,
+        queuedAtTurn: st.turnNumber || 0,
+        executeAtTurn: (st.turnNumber || 0) + 2
+      };
+      tile.actionQueue.push(actionWithDelay);
+      setLastMove(x, y);
+      // DO NOT call nextNormalTurn - AU actions don't end the turn
+      return cb && cb({ ok: true });
+    } else if (type === 'auAttackAdjacent') {
+      // Immediate attack on adjacent enemy unit
+      const { x, y, targetX, targetY } = payload;
+      if (!inside(x, y, st.size) || !inside(targetX, targetY, st.size)) {
+        return cb && cb({ ok: false, err: 'Out of bounds' });
+      }
+      
+      const au = st.grid[y][x];
+      if (!au || au.type !== 'au' || au.pid !== pid) {
+        return cb && cb({ ok: false, err: 'Invalid AU' });
+      }
+      
+      // Check if target is adjacent (4-way cardinal)
+      const dx = Math.abs(targetX - x);
+      const dy = Math.abs(targetY - y);
+      if (dx + dy !== 1) {
+        return cb && cb({ ok: false, err: 'Target not adjacent' });
+      }
+      
+      const target = st.grid[targetY][targetX];
+      if (!target || (target.type !== 'unit' && target.type !== 'au')) {
+        return cb && cb({ ok: false, err: 'No valid target' });
+      }
+      
+      // Cannot attack own units
+      if (target.pid === pid) {
+        return cb && cb({ ok: false, err: 'Cannot attack own unit' });
+      }
+      
+      // Deal 1 damage to target
+      target.level = Math.max(0, (Number.isFinite(target.level) ? target.level : 1) - 1);
+      if (target.level === 0) {
+        st.grid[targetY][targetX] = null;
+      }
+      
+      setLastMove(x, y);
+      // AU attack counts as action, end turn
+      io.to(rid).emit('state', st);
+      removeDeadPlayers(room);
+      checkEndGame(rid);
+      nextNormalTurn(rid);
+      return cb && cb({ ok: true });
+    } else if (type === 'placeStructureFromAU') {
+      const { x, y } = payload;
+      if (!inside(x, y, st.size)) return cb && cb({ ok: false, err: 'Out of bounds' });
+      const tile = st.grid[y][x];
+      if (!tile || tile.type !== 'au' || tile.pid !== pid) return cb && cb({ ok: false, err: 'Invalid AU' });
+      // Convert AU to standard unit (SU)
+      st.grid[y][x] = { type: 'unit', pid, level: tile.level || 1 };
+      claimTile(st, x, y, pid);
+      setLastMove(x, y);
+      cb && cb({ ok: true });
     } else {
       return cb && cb({ ok: false, err: 'Unknown action' });
     }
@@ -1406,10 +1785,45 @@ io.on('connection', socket => {
     if (myRoom && rooms[myRoom]) {
       const room = rooms[myRoom];
       const idx = room.players.findIndex(p => p.sid === socket.id);
-      if (idx !== -1) { const leaving = room.players.splice(idx, 1)[0]; if (room.state) removePlayerFromState(room, leaving.pid); }
+      if (idx !== -1) {
+        // Graceful disconnect: mark player as disconnected, don't immediately remove from room/state
+        const leaving = room.players[idx];
+        leaving.sid = null;
+        leaving.disconnectedAt = Date.now();
+        // Keep the player in the room list for a short grace period to allow reconnection
+        io.to(myRoom).emit('lobbyUpdate', { players: room.players, config: room.config });
+        if (room.state) io.to(myRoom).emit('state', room.state);
+
+        // Schedule removal if player doesn't reconnect within 60 seconds
+        (function(rid, pid) {
+          const timer = setTimeout(() => {
+            const r = rooms[rid];
+            if (!r) return;
+            const pIndex = r.players.findIndex(p => p.pid === pid && !p.sid);
+            if (pIndex !== -1) {
+              const removed = r.players.splice(pIndex, 1)[0];
+              if (r.state) removePlayerFromState(r, removed.pid);
+              // If no human players remain, close the match entirely
+              const humanRemaining = r.players.filter(p => !p.isAI).length;
+              if (humanRemaining === 0) {
+                if (r.timer) { clearInterval(r.timer); r.timer = null; }
+                if (r.state) {
+                  r.state.ended = true;
+                  io.to(rid).emit('gameEnded', { reason: 'No human players remaining' });
+                }
+                delete rooms[rid];
+              } else {
+                io.to(rid).emit('lobbyUpdate', { players: r.players, config: r.config });
+                if (r.state) io.to(rid).emit('state', r.state);
+              }
+            }
+          }, 60000);
+          // attach timer reference so we could cancel if needed later
+          room._disconnectTimers = room._disconnectTimers || {};
+          room._disconnectTimers[pid] = timer;
+        })(myRoom, leaving.pid);
+      }
       socket.leave(myRoom);
-      if (!room.players.length) { if (room.timer) { clearInterval(room.timer); room.timer = null; } delete rooms[myRoom]; }
-      else { io.to(myRoom).emit('lobbyUpdate', { players: room.players, config: room.config }); if (room.state) io.to(myRoom).emit('state', room.state); }
     }
   });
 

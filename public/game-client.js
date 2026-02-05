@@ -14,11 +14,35 @@ let zoom = 1.0;
 let grassVariantCache = {};
 
 // Coordinate visibility toggle
-let showCoordinates = true;
+let showCoordinates = false;
+
+// Claims visibility toggle (on by default)
+let showClaims = true;
+
+// Last clicked tile for texture display
+let lastClickedTile = null;  // {x, y} of last clicked tile
 
 // Camera / viewport
 let offsetX = 0;
 let offsetY = 0;
+
+// Unit spawning UI state
+let selectedUnitSpawnSource = null;  // {x, y} of unit being spawned from
+let spawnHighlightTiles = [];        // Array of {x, y} tiles highlighted for spawning
+
+// Building placement UI state
+let selectedBuildingSource = null;   // {x, y, buildingType} for building placement
+let buildHighlightTiles = [];        // Array of {x, y} tiles highlighted for building placement
+
+// AU action UI state
+let selectedAUActionSource = null;   // {x, y} of AU being commanded
+let auActionMode = null;             // 'move' or 'attack'
+let auActionHighlights = [];         // Array of {x, y, actionNum} for action tiles
+let auActionsQueued = [];            // Actions queued: [{type, direction}, ...]
+
+// AU structure placement state
+let selectedAUStructurePlacement = null;  // {x, y} of AU placing structure
+let structurePlacementHighlights = [];    // Array of {x, y} tiles for placement
 
 // Custom texture loader (place your files under public/custom_assets/custom/)
 const customTextures = {
@@ -67,7 +91,16 @@ const customTextures = {
    sand: null,
    obstacleVariants: [null], // Single obstacle texture
    // Unit textures by level
-   unitLevels: [null, null, null] // Unit_Lvl_1, Unit_Lvl_2, Unit_Lvl_3
+   unitLevels: [null, null, null], // Unit_Lvl_1, Unit_Lvl_2, Unit_Lvl_3
+   // Unit type textures
+   unitTypes: {
+     swordsman: null  // Swordsman base texture
+   },
+   // Claimed land textures
+   claimed: {
+     grass: null,
+     water1: null
+   }
 };
 
 // Track texture loading completion
@@ -131,6 +164,20 @@ function loadTextures() {
     customTextures.unitLevels[1] = await loadImage('Unit_L2.png') || await loadImage('unit_l2.png');
     customTextures.unitLevels[2] = await loadImage('Unit_L3.png') || await loadImage('unit_l3.png');
     
+    // Load unit type textures (Swordsman, etc.)
+    customTextures.unitTypes.swordsman = await loadImage('Swordsman.png') || await loadImage('swordsman.png');
+    
+    // Load claimed land textures
+    customTextures.claimed.grass = await loadImage('Grass_Claimed.png') || await loadImage('grass_claimed.png');
+    customTextures.claimed.water1 = await loadImage('Water1_Claimed.png') || await loadImage('water1_claimed.png');
+    
+    // Log texture load status
+    console.log('🖼️ Claimed textures loaded:', {
+      grass: customTextures.claimed.grass ? '✓' : '✗',
+      water1: customTextures.claimed.water1 ? '✓' : '✗',
+      swordsman: customTextures.unitTypes.swordsman ? '✓' : '✗'
+    });
+    
     texturesLoadedResolve?.();
   })();
 }
@@ -143,6 +190,7 @@ const leaveBtn = document.getElementById('leaveBtn');
 const startBtn = document.getElementById('startBtn');
 const roomLabel = document.getElementById('roomLabel');
 const playersList = document.getElementById('playersList');
+const botsList = document.getElementById('botsList');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d', { alpha: true, antialias: true, willReadFrequently: false });
 // Optimize for quality rendering
@@ -171,6 +219,7 @@ let riverOnSel = document.getElementById('riverOn');
 let lakeOnSel = document.getElementById('lakeOn');
 const tileEventsMaxSel = document.getElementById('tileEventsMax');
 const guidePanelToggle = document.getElementById('guidePanelToggle');
+const inMatchPlayersBar = document.getElementById('inMatchPlayersBar');
 const guidePanelContent = document.getElementById('guidePanelContent');
 let guidePanelOpen = false;
 const advancedBtn = document.getElementById('advancedBtn');
@@ -304,7 +353,7 @@ function populateHostSelects() {
 
   if (tileEventsMaxSel) {
     tileEventsMaxSel.innerHTML = '';
-    for (let i = 0; i <= 10; i++) {
+    for (let i = 0; i <= 30; i += 2) {
       const opt = document.createElement('option'); opt.value = i; opt.text = i; tileEventsMaxSel.appendChild(opt);
     }
   }
@@ -436,6 +485,15 @@ if (coordToggle) {
   });
 }
 
+// Claims toggle listener (for game UI)
+const claimsToggle = document.getElementById('showClaimsToggle');
+if (claimsToggle) {
+  claimsToggle.addEventListener('change', () => {
+    showClaims = claimsToggle.checked;
+    requestDraw();
+  });
+}
+
 startBtn.onclick = () => {
   if (!roomId) return alert('No room');
   socket.emit('startGame', { roomId }, (res) => { if (!res.ok) alert(res.err); });
@@ -505,6 +563,12 @@ socket.on('gameStarted', ({ state: st }) => {
   // Reset variant caches for new game
   grassVariantCache = {};
   
+  // Resize canvas now that game is starting
+  setTimeout(() => resizeCanvas(), 50);
+  
+  // Initialize resources display
+  updateResourcesDisplay();
+  
   // Show loading screen
   const loadingOverlay = document.getElementById('loadingOverlay');
   if (loadingOverlay) loadingOverlay.style.display = 'flex';
@@ -539,6 +603,22 @@ socket.on('gameStarted', ({ state: st }) => {
   } else {
     console.error('❌ Could not find gameUI div');
   }
+
+  // Ensure top navigation is hidden during active matches
+  try {
+    const topNav = document.getElementById('topNav');
+    if (topNav) {
+      topNav.style.display = 'none';
+      // clear any pinned positioning in case it was changed
+      topNav.style.position = '';
+      topNav.style.top = '';
+      topNav.style.right = '';
+      topNav.style.left = '';
+      topNav.style.zIndex = '';
+    }
+  } catch (e) {
+    console.warn('Could not adjust topNav for game UI', e);
+  }
   
   if (hostControlsDiv) {
     hostControlsDiv.style.display = 'none';
@@ -563,7 +643,115 @@ socket.on('gameEnded', ({ reason }) => {
   location.reload();
 });
 
-socket.on('state', (st) => { state = st; requestDraw(); updateLeaderboard(); });
+socket.on('state', (st) => { 
+  state = st; 
+  // Log AU count for debugging
+  if (st && st.grid) {
+    let auCount = 0;
+    for (let y = 0; y < st.size; y++) {
+      for (let x = 0; x < st.size; x++) {
+        if (st.grid[y][x] && st.grid[y][x].type === 'au') {
+          auCount++;
+        }
+      }
+    }
+    if (auCount > 0) {
+      console.log(`📡 State received with ${auCount} AU units`);
+    }
+  }
+  updateResourcesDisplay(); 
+  requestDraw(); 
+  updateLeaderboard(); 
+  // Update in-match players/bots bar (inline)
+  if (inMatchPlayersBar) renderInMatchPlayers(state);
+});
+function computeClaimCounts(st) {
+  const counts = {};
+  if (!st || !st.claims) return counts;
+  for (const key in st.claims) {
+    const pid = st.claims[key];
+    if (pid == null) continue;
+    counts[pid] = (counts[pid] || 0) + 1;
+  }
+  return counts;
+}
+
+function renderInMatchPlayers(st) {
+  if (!st || !st.playersMeta || !inMatchPlayersBar) return;
+  const counts = computeClaimCounts(st);
+  inMatchPlayersBar.innerHTML = '';
+
+  const players = Object.keys(st.playersMeta).map(k => ({ pid: Number(k), ...st.playersMeta[k] }));
+  // Render human and bot entries inline
+  players.forEach(p => {
+    const entry = document.createElement('div');
+    entry.style.display = 'flex';
+    entry.style.alignItems = 'center';
+    entry.style.justifyContent = 'space-between';
+    entry.style.padding = '6px 8px';
+    entry.style.borderRadius = '3px';
+    entry.style.background = 'rgba(0,0,0,0.0)';
+    entry.style.color = '#fff';
+    entry.style.width = '100%';
+    entry.style.boxSizing = 'border-box';
+
+    const left = document.createElement('div');
+    left.style.display = 'flex';
+    left.style.alignItems = 'center';
+    left.style.gap = '8px';
+
+    // color dots similar to chat (C1/C2 or fallback to color)
+    if (p.c1 && p.c2) {
+      const d1 = document.createElement('span');
+      d1.style.display = 'inline-block'; d1.style.width = '8px'; d1.style.height = '8px'; d1.style.background = p.c1; d1.style.borderRadius = '50%';
+      const d2 = document.createElement('span');
+      d2.style.display = 'inline-block'; d2.style.width = '8px'; d2.style.height = '8px'; d2.style.background = p.c2; d2.style.borderRadius = '50%';
+      left.appendChild(d1); left.appendChild(d2);
+    } else {
+      const d = document.createElement('span');
+      d.style.display = 'inline-block'; d.style.width = '10px'; d.style.height = '10px'; d.style.background = p.color || '#3498db'; d.style.borderRadius = '3px';
+      left.appendChild(d);
+    }
+
+    const nameText = document.createElement('span');
+    nameText.style.color = '#fff';
+    nameText.style.fontWeight = '700';
+    nameText.textContent = `${p.name || 'Player'} (${p.pid})`;
+    left.appendChild(nameText);
+
+    const claimText = document.createElement('span');
+    claimText.style.color = '#e6e6e6';
+    claimText.style.fontWeight = '600';
+    claimText.textContent = `Claims = ${counts[p.pid] || 0}`;
+    left.appendChild(claimText);
+
+    entry.appendChild(left);
+
+    if (isHost && typeof socket !== 'undefined') {
+      const right = document.createElement('div');
+      right.style.display = 'flex';
+      right.style.alignItems = 'center';
+      right.style.gap = '6px';
+
+      const btn = document.createElement('button');
+      btn.textContent = p.isAI ? 'Kick Bot' : 'Kick';
+      btn.className = 'kickBtn';
+      btn.addEventListener('click', () => {
+        socket.emit('kickPlayer', { roomId, targetPid: p.pid }, (res) => {
+          if (res && res.ok) {
+            alert(`${p.isAI ? 'Bot' : 'Player'} ${p.name} kicked`);
+          } else {
+            alert(res?.err || 'Kick failed');
+          }
+        });
+      });
+      right.appendChild(btn);
+      entry.appendChild(right);
+    }
+
+    inMatchPlayersBar.appendChild(entry);
+  });
+}
 
 socket.on('turnChange', ({ activePid }) => {
   if (!state) return;
@@ -634,13 +822,22 @@ socket.on('playerKicked', ({ reason }) => {
   location.reload();
 });
 
+socket.on('playerTimedOut', ({ pid: timedPid, reason }) => {
+  if (timedPid === pid) {
+    alert('You timed out during starter placement. You were not disconnected, but your starter was skipped.');
+  } else {
+    // notify host/players that someone timed out
+    console.info('Player timed out:', timedPid, reason);
+  }
+});
+
 socket.on('lobbyKicked', ({ reason }) => {
   alert(reason || 'You have been removed from the lobby.');
   location.reload();
 });
 
 // Chat handlers
-socket.on('chatMessage', ({ sender, senderColor, message, timestamp }) => {
+socket.on('chatMessage', ({ sender, senderColor, senderC1, senderC2, message, timestamp }) => {
   if (!chatMessages) return;
   const msgDiv = document.createElement('div');
   msgDiv.style.marginBottom = '6px';
@@ -649,8 +846,21 @@ socket.on('chatMessage', ({ sender, senderColor, message, timestamp }) => {
   msgDiv.style.wordWrap = 'break-word';
   msgDiv.style.overflowWrap = 'break-word';
   const time = new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const colorDot = `<span style="display:inline-block;width:8px;height:8px;background:${senderColor || '#3498db'};border-radius:50%;margin-left:4px;vertical-align:middle;"></span>`;
-  msgDiv.innerHTML = `<strong style="color:#2c3e50">${sender}</strong>${colorDot} <span style="color:#7f8c8d;font-size:11px">${time}</span><br><span style="color:#34495e;margin-left:4px;display:inline-block;">${message}</span>`;
+  
+  // Create color dots for C1 and C2
+  let colorDots = '';
+  if (senderC1 && senderC2) {
+    // C1 first (inner), then C2 (outer)
+    colorDots = `<span style="display:inline-block;width:8px;height:8px;background:${senderC1};border-radius:50%;margin-left:4px;vertical-align:middle;"></span><span style="display:inline-block;width:8px;height:8px;background:${senderC2};border-radius:50%;margin-left:2px;vertical-align:middle;"></span>`;
+  } else {
+    colorDots = `<span style="display:inline-block;width:8px;height:8px;background:${senderColor || '#3498db'};border-radius:50%;margin-left:4px;vertical-align:middle;"></span>`;
+  }
+  
+  // Check if this is the current player's message
+  const isOwnMessage = (state && state.playersMeta && state.playersMeta[pid] && state.playersMeta[pid].name === sender);
+  const messageColor = isOwnMessage ? '#fff' : '#34495e';
+  
+  msgDiv.innerHTML = `<strong style="color:#fff">${sender}</strong>${colorDots} <span style="color:#7f8c8d;font-size:11px">${time}</span><br><span style="color:${messageColor};margin-left:4px;display:inline-block;">${message}</span>`;
   chatMessages.appendChild(msgDiv);
   // Auto-scroll to bottom when new message arrives
   setTimeout(() => {
@@ -749,7 +959,31 @@ function resetTurnTimer() {
   }, 1000);
 }
 
-// Canvas input
+// Canvas input and responsive sizing
+function resizeCanvas() {
+  const container = document.getElementById('mapContainer');
+  if (!container) {
+    console.warn('⚠️ mapContainer not found, retrying in 100ms');
+    setTimeout(resizeCanvas, 100);
+    return;
+  }
+  const rect = container.getBoundingClientRect();
+  let size = Math.min(rect.width, rect.height);
+  
+  // Fallback: if container has no size yet, use a default
+  if (size <= 0) {
+    console.warn('⚠️ Container has 0 size, using fallback 600px');
+    size = 600;
+  }
+  
+  canvas.width = size;
+  canvas.height = size;
+  console.log(`📐 Canvas resized to ${size}x${size}`);
+  requestDraw();
+}
+
+window.addEventListener('resize', resizeCanvas);
+
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
 function showTransientPopup(px, py, text, ms=2000){
@@ -762,9 +996,233 @@ function showTransientPopup(px, py, text, ms=2000){
   popup.style.padding = '4px 6px';
   popup.style.fontSize = '12px';
   popup.style.zIndex = 9999;
+  popup.style.color = '#000';
   popup.textContent = text;
   mapContainer.appendChild(popup);
   setTimeout(()=>popup.remove(), ms);
+}
+
+// Flash gold display red when not enough resources
+function flashGoldRed() {
+  const goldElement = document.getElementById('res-gold');
+  if (!goldElement) return;
+  
+  const originalColor = goldElement.style.color;
+  let flashes = 0;
+  const flashInterval = setInterval(() => {
+    flashes++;
+    goldElement.style.color = flashes % 2 === 1 ? '#ff4444' : originalColor;
+    if (flashes >= 4) {
+      clearInterval(flashInterval);
+      goldElement.style.color = originalColor;
+    }
+  }, 150); // 150ms per flash (gentler than default)
+}
+
+// Update resource display
+function updateResourcesDisplay() {
+  if (!state || !state.playersMeta[pid]) return;
+  const resources = state.playersMeta[pid].resources || { stone: 0, wood: 0, coal: 0, copper: 0, iron: 0, gold: 0 };
+  
+  let goldAmount = resources.gold || 0;
+  
+  // Clamp gold to reasonable range (0.1 to 999.9)
+  if (goldAmount > 999.9) goldAmount = 999.9;
+  if (goldAmount < 0.1 && goldAmount > 0) goldAmount = 0.1;
+  if (goldAmount < 0) goldAmount = 0;
+  
+  const goldElement = document.getElementById('res-gold');
+  
+  // Log gold updates for debugging
+  if (window.lastGoldAmount !== undefined && window.lastGoldAmount !== goldAmount) {
+    console.log(`💰 Gold updated: ${window.lastGoldAmount} → ${goldAmount}`);
+  }
+  window.lastGoldAmount = goldAmount;
+  
+  if (goldElement) {
+    // Format to 1 decimal place
+    goldElement.textContent = goldAmount.toFixed(1);
+  }
+  
+  // Calculate income from claimed tiles
+  // Income is 0.1 gold per claimed tile per turn
+  if (!state.claims) state.claims = {};
+  let claimedTileCount = 0;
+  for (const claimKey in state.claims) {
+    if (state.claims[claimKey] === pid) {
+      claimedTileCount++;
+    }
+  }
+  const incomePerTurn = claimedTileCount * 0.1;
+  
+  const incomeElement = document.getElementById('res-income');
+  if (incomeElement) {
+    incomeElement.textContent = `+${incomePerTurn.toFixed(1)}g`;
+  }
+}
+
+// Get spawn positions for a unit (cardinal directions - only valid/empty tiles)
+function getSpawnPositions(x, y) {
+  const positions = [];
+  const directions = [[0, -1], [0, 1], [-1, 0], [1, 0]];  // up, down, left, right
+  
+  if (!state || !state.grid || !state.terrain) return positions;
+  const size = state.size;
+  
+  for (const [dx, dy] of directions) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (nx >= 0 && ny >= 0 && nx < size && ny < size) {
+      // Check if tile is empty (no unit, building, or obstacle)
+      const gridCell = state.grid[ny] && state.grid[ny][nx];
+      if (!gridCell) {
+        // Also check terrain - don't include deep water
+        const terrain = state.terrain[ny] && state.terrain[ny][nx];
+        const isDeepWater = terrain && terrain.type === 'water';
+        
+        // For movement, exclude deep water surrounded by water
+        let canMove = true;
+        if (isDeepWater) {
+          const adjDirs = [[0,-1],[0,1],[-1,0],[1,0]];
+          let surroundedCount = 0;
+          for (const [ddx, ddy] of adjDirs) {
+            const nnx = nx + ddx, nny = ny + ddy;
+            if (nnx >= 0 && nny >= 0 && nnx < size && nny < size) {
+              const adjTerr = state.terrain[nny] && state.terrain[nny][nnx];
+              if (adjTerr && adjTerr.type === 'water') surroundedCount++;
+            }
+          }
+          canMove = surroundedCount < 4;  // Only block if surrounded on all 4 sides
+        }
+        
+        if (canMove) {
+          positions.push({ x: nx, y: ny });
+        }
+      }
+    }
+  }
+  
+  return positions;
+}
+
+// Get attack positions for Swordsman (cardinal directions only, show all tiles with isOwn flag)
+function getSwordsmanAttackPositions(x, y) {
+  const positions = [];
+  if (!state || !state.grid) return positions;
+  const size = state.size;
+  const playerPid = pid;
+  
+  // Swordsman attack: cardinal directions (up, down, left, right)
+  const cardinalDirs = [
+    [0, -1], [0, 1], [-1, 0], [1, 0]  // up, down, left, right
+  ];
+  
+  for (const [dx, dy] of cardinalDirs) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (nx >= 0 && ny >= 0 && nx < size && ny < size) {
+      const gridCell = state.grid[ny] && state.grid[ny][nx];
+      // Mark own tiles for different display, but include all tiles
+      const isOwn = gridCell && gridCell.pid === playerPid;
+      positions.push({ x: nx, y: ny, isOwn });
+    }
+  }
+  
+  return positions;
+}
+
+function getHorsemenMovementPositions(x, y) {
+  const positions = [];
+  if (!state || !state.grid) return positions;
+  const size = state.size;
+  
+  // Horseman movement: all 8 adjacent tiles (cardinal + diagonal)
+  const allDirections = [
+    [0, -1], [0, 1], [-1, 0], [1, 0],  // cardinal
+    [-1, -1], [-1, 1], [1, -1], [1, 1]  // diagonal
+  ];
+  
+  for (const [dx, dy] of allDirections) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (nx >= 0 && ny >= 0 && nx < size && ny < size) {
+      const gridCell = state.grid[ny] && state.grid[ny][nx];
+      // Empty or enemy tile only
+      if (!gridCell || (gridCell.type !== 'building' && gridCell.pid !== pid)) {
+        positions.push({ x: nx, y: ny });
+      }
+    }
+  }
+  
+  return positions;
+}
+
+function getHorsemenAttackPositions(x, y) {
+  const positions = [];
+  if (!state || !state.grid) return positions;
+  const size = state.size;
+  const playerPid = pid;
+  
+  // Horseman attack: all 8 adjacent tiles (cardinal + diagonal)
+  const allDirections = [
+    [0, -1], [0, 1], [-1, 0], [1, 0],  // cardinal
+    [-1, -1], [-1, 1], [1, -1], [1, 1]  // diagonal
+  ];
+  
+  for (const [dx, dy] of allDirections) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (nx >= 0 && ny >= 0 && nx < size && ny < size) {
+      const gridCell = state.grid[ny] && state.grid[ny][nx];
+      // Mark own tiles for different display, but include all tiles
+      const isOwn = gridCell && gridCell.pid === playerPid;
+      positions.push({ x: nx, y: ny, isOwn });
+    }
+  }
+  
+  return positions;
+}
+
+function getArcherAttackPositions(x, y) {
+  const positions = [];
+  if (!state || !state.grid) return positions;
+  const size = state.size;
+  const auUnit = state.grid[y] && state.grid[y][x];
+  const playerPid = pid;
+  
+  // Archer attack pattern:
+  // Range 1: all 8 adjacent tiles (up, down, left, right + all 4 diagonals) - attacks THROUGH water
+  const allDirections = [
+    [0, -1], [0, 1], [-1, 0], [1, 0],  // up, down, left, right
+    [-1, -1], [-1, 1], [1, -1], [1, 1]  // diagonal corners
+  ];
+  
+  for (const [dx, dy] of allDirections) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (nx >= 0 && ny >= 0 && nx < size && ny < size) {
+      // Check if there's a valid target
+      const gridCell = state.grid[ny] && state.grid[ny][nx];
+      // Mark own tiles for different display, but include all tiles
+      const isOwn = gridCell && gridCell.pid === playerPid;
+      positions.push({ x: nx, y: ny, isOwn });
+    }
+  }
+  
+  // Range 2: straight directions only (up, down, left, right) - attacks THROUGH water
+  const cardinalDirs = [[0, -2], [0, 2], [-2, 0], [2, 0]];
+  for (const [dx, dy] of cardinalDirs) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (nx >= 0 && ny >= 0 && nx < size && ny < size) {
+      // Check if there's a valid target
+      const gridCell = state.grid[ny] && state.grid[ny][nx];
+      const isOwn = gridCell && gridCell.pid === playerPid;
+      positions.push({ x: nx, y: ny, isOwn });
+    }
+  }
+  
+  return positions;
 }
 
 function eventOverlayStyle(type) {
@@ -778,6 +1236,7 @@ function eventOverlayStyle(type) {
 // Mouse click handling
 canvas.addEventListener('mousedown', (ev)=>{
   if(!state) return;
+  ev.stopPropagation();  // Prevent event from bubbling to document
   const size = state.size;
   const tSize = baseTile(size)*zoom;
   const rect = canvas.getBoundingClientRect();
@@ -785,6 +1244,9 @@ canvas.addEventListener('mousedown', (ev)=>{
   const mapY = (ev.clientY - rect.top) / tSize + offsetY;
   const x = Math.floor(mapX), y = Math.floor(mapY);
   if(x<0||y<0||x>=size||y>=size) return;
+
+  // Track last clicked tile for texture indicator
+  lastClickedTile = {x, y};
 
   const activePid = state.turnOrder[state.activeIndex];
 
@@ -804,26 +1266,832 @@ canvas.addEventListener('mousedown', (ev)=>{
     return;
   }
 
-  const cell = state.grid[y][x];
-  if(!cell || cell.type!=='unit') return;
+  // Check if clicking on a spawn highlight position
+  if (selectedUnitSpawnSource && spawnHighlightTiles.length > 0) {
+    // Check if clicking on the source unit itself to cancel
+    if (x === selectedUnitSpawnSource.x && y === selectedUnitSpawnSource.y) {
+      selectedUnitSpawnSource = null;
+      spawnHighlightTiles = [];
+      requestDraw();
+      return;
+    }
+    const isSpawnTile = spawnHighlightTiles.some(t => t.x === x && t.y === y);
+    if (isSpawnTile) {
+      // Check if this is barracks spawn, regular SU spawn, or tower attack
+      if (selectedUnitSpawnSource.type === 'barracks') {
+        // Barracks spawn - use barracksSpawn action
+        socket.emit('action', {
+          roomId,
+          type: 'barracksSpawn',
+          payload: {
+            barracksX: selectedUnitSpawnSource.x,
+            barracksY: selectedUnitSpawnSource.y,
+            spawnX: x,
+            spawnY: y,
+            auType: selectedUnitSpawnSource.auType || 'swordsman'
+          }
+        }, (res) => {
+          if (res?.ok) {
+            flashTile(x, y, '#2ecc71');
+            selectedUnitSpawnSource = null;
+            spawnHighlightTiles = [];
+            requestDraw();
+          } else {
+            showTransientPopup(ev.clientX-rect.left+8, ev.clientY-rect.top+8, res?.err || 'Spawn failed');
+          }
+        });
+      } else if (selectedUnitSpawnSource.type === 'tower') {
+        // Tower attack - check for friendly fire first
+        const targetTile = spawnHighlightTiles.find(t => t.x === x && t.y === y);
+        if (targetTile && targetTile.isOwn) {
+          showTransientPopup(ev.clientX-rect.left+8, ev.clientY-rect.top+8, "It's yours - no friendly fire!");
+          selectedUnitSpawnSource = null;
+          spawnHighlightTiles = [];
+          requestDraw();
+          return;
+        }
+        
+        // Tower attack - use towerAttack action
+        socket.emit('action', {
+          roomId,
+          type: 'towerAttack',
+          payload: {
+            towerX: selectedUnitSpawnSource.x,
+            towerY: selectedUnitSpawnSource.y,
+            targetX: x,
+            targetY: y
+          }
+        }, (res) => {
+          if (res?.ok) {
+            flashTile(x, y, '#e74c3c');
+            selectedUnitSpawnSource = null;
+            spawnHighlightTiles = [];
+            requestDraw();
+          } else {
+            showTransientPopup(ev.clientX-rect.left+8, ev.clientY-rect.top+8, res?.err || 'Attack failed');
+          }
+        });
+      } else {
+        // Regular SU spawn
+        socket.emit('action', {
+          roomId,
+          type: 'spawnUnit',
+          payload: {
+            fromX: selectedUnitSpawnSource.x,
+            fromY: selectedUnitSpawnSource.y,
+            toX: x,
+            toY: y,
+            auType: selectedUnitSpawnSource.auType || 'swordsman'
+          }
+        }, (res) => {
+          if (res?.ok) {
+            flashTile(x, y, '#2ecc71');
+            selectedUnitSpawnSource = null;
+            spawnHighlightTiles = [];
+            requestDraw();
+          } else {
+            showTransientPopup(ev.clientX-rect.left+8, ev.clientY-rect.top+8, res?.err || 'Spawn failed');
+          }
+        });
+      }
+      return;
+    } else {
+      // Clicked elsewhere - cancel spawn mode
+      selectedUnitSpawnSource = null;
+      spawnHighlightTiles = [];
+      requestDraw();
+      return;
+    }
+  }
 
-  if(cell.pid===pid){
-    if(ev.button===0) socket.emit('action',{roomId,type:'upgrade',payload:{x,y}},(res)=>{if(res?.ok) flashTile(x,y,'#2ecc71');});
-    if(ev.button===2) socket.emit('action',{roomId,type:'downgrade',payload:{x,y}},(res)=>{if(res?.ok) flashTile(x,y,'#e74c3c');});
-  } else {
-    if(ev.button===0){
-      const owner = state.playersMeta[cell.pid]?.name||`Player ${cell.pid}`;
-      const r = canvas.getBoundingClientRect();
-      showTransientPopup(ev.clientX-r.left+8, ev.clientY-r.top+8, `Owner: ${owner}`);
+  // Check if clicking on a building highlight position (NOT USED - buildings build on unit tile)
+  // This code can be removed as buildings are built immediately when selected from menu
+
+  // Check if clicking on an AU action highlight (Move/Attack)
+  if (selectedAUActionSource && auActionHighlights.length > 0) {
+    const actionTile = auActionHighlights.find(t => t.x === x && t.y === y);
+    if (actionTile) {
+      // For attack mode, check if tile is own (friendly fire check)
+      if (auActionMode === 'attack' && actionTile.isOwn) {
+        showTransientPopup(ev.clientX-rect.left+8, ev.clientY-rect.top+8, "It's yours - no friendly fire!");
+        selectedAUActionSource = null;
+        auActionMode = null;
+        auActionHighlights = [];
+        requestDraw();
+        return;
+      }
+      
+      // Calculate direction
+      const dx = x - selectedAUActionSource.x;
+      const dy = y - selectedAUActionSource.y;
+      
+      // Send single action to server
+      const action = {
+        type: auActionMode,  // 'move' or 'attack'
+        direction: [dx, dy]
+      };
+      
+      socket.emit('action', {
+        roomId,
+        type: 'setAUActions',
+        payload: {
+          x: selectedAUActionSource.x,
+          y: selectedAUActionSource.y,
+          action: action
+        }
+      }, (res) => {
+        if (res?.ok) {
+          // Optimistic update: immediately show checkmark on AU
+          const auTile = state.grid[selectedAUActionSource.y][selectedAUActionSource.x];
+          if (auTile && !auTile.actionQueue) auTile.actionQueue = [];
+          if (auTile) auTile.actionQueue.push(action);
+          
+          flashTile(selectedAUActionSource.x, selectedAUActionSource.y, '#2ecc71');
+          selectedAUActionSource = null;
+          auActionMode = null;
+          auActionHighlights = [];
+          requestDraw();
+        } else {
+          showTransientPopup(ev.clientX-rect.left+8, ev.clientY-rect.top+8, res?.err || 'Action failed');
+        }
+      });
+      return;
+    } else {
+      // Clicked on non-action tile - cancel action mode
+      selectedAUActionSource = null;
+      auActionMode = null;
+      auActionHighlights = [];
+      requestDraw();
+      return;
+    }
+  }
+
+  // Check if clicking on a structure placement highlight
+  if (selectedAUStructurePlacement && structurePlacementHighlights.length > 0) {
+    const isPlacementTile = structurePlacementHighlights.some(t => t.x === x && t.y === y);
+    if (isPlacementTile) {
+      // Try to place structure unit at the clicked placement tile (converts AU -> SU at that tile)
+      socket.emit('action', {
+        roomId,
+        type: 'placeStructureFromAU',
+        payload: {
+          x: x,
+          y: y
+        }
+      }, (res) => {
+        if (res?.ok) {
+          flashTile(x, y, '#3498db');
+          selectedAUStructurePlacement = null;
+          structurePlacementHighlights = [];
+          requestDraw();
+        } else {
+          showTransientPopup(ev.clientX-rect.left+8, ev.clientY-rect.top+8, res?.err || 'Placement failed');
+        }
+      });
+      return;
+    } else {
+      // Clicked on non-placement tile - cancel placement mode
+      selectedAUStructurePlacement = null;
+      structurePlacementHighlights = [];
+      requestDraw();
+      return;
+    }
+  }
+
+  const cell = state.grid[y][x];
+  if(!cell) return;
+
+  // Handle AU (Advanced Unit) interactions
+  if(cell.type === 'au') {
+    if(cell.pid === pid) {
+      // Left click on own AU: show Move/Attack menu
+      showAUContextMenu(x, y, ev.clientX, ev.clientY);
+    }
+    return;
+  }
+
+  // Handle structure units and buildings
+  if(cell.type === 'unit') {
+    if(cell.pid === pid) {
+      // Left click: show menu (upgrade, spawn)
+      showUnitContextMenu(x, y, ev.clientX, ev.clientY);
+    } else {
+      if(ev.button === 0){
+        const owner = state.playersMeta[cell.pid]?.name||`Player ${cell.pid}`;
+        const r = canvas.getBoundingClientRect();
+        showTransientPopup(ev.clientX-r.left+8, ev.clientY-r.top+8, `Owner: ${owner}`);
+      }
+    }
+  } 
+  // Handle buildings - show menu or info
+  else if(cell.type === 'building') {
+    if(ev.button === 0){
+      // Check if this is the player's barracks
+      if(cell.buildingType === 'barracks' && cell.pid === pid) {
+        showBarracksSpawnMenu(x, y, ev.clientX, ev.clientY);
+      } else if(cell.buildingType === 'tower' && cell.pid === pid) {
+        // Tower attack - show attack position highlights
+        showTowerAttackMenu(x, y, ev.clientX, ev.clientY);
+      } else {
+        // Show info popup for other buildings or enemy buildings
+        const owner = state.playersMeta[cell.pid]?.name||`Player ${cell.pid}`;
+        const r = canvas.getBoundingClientRect();
+        const buildingName = cell.buildingType.charAt(0).toUpperCase() + cell.buildingType.slice(1);
+        showTransientPopup(ev.clientX-r.left+8, ev.clientY-r.top+8, `${buildingName} (${owner}) - HP: ${cell.hp}/${cell.maxHp}`);
+      }
     }
   }
 });
+
+// Show spawn menu for Barracks (manual spawning with tile selection)
+function showBarracksSpawnMenu(x, y, clientX, clientY) {
+  const existing = document.getElementById('barracksSpawnMenu');
+  if (existing) existing.remove();
+  
+  // Calculate spawn positions (all 8 adjacent tiles - range 1)
+  const adjDirs = [
+    [0,-1],[0,1],[-1,0],[1,0],        // Cardinal (N, S, W, E)
+    [-1,-1],[1,-1],[-1,1],[1,1]       // Diagonal (NW, NE, SW, SE)
+  ];
+  const validSpawnTiles = [];
+  
+  for (const [dx, dy] of adjDirs) {
+    const nx = x + dx, ny = y + dy;
+    // Check if position is within bounds and empty
+    if (nx >= 0 && ny >= 0 && nx < (state?.size || 20) && ny < (state?.size || 20)) {
+      if (!state.grid[ny] || !state.grid[ny][nx]) {
+        validSpawnTiles.push({x: nx, y: ny});
+      }
+    }
+  }
+  
+  if (validSpawnTiles.length === 0) {
+    const r = canvas.getBoundingClientRect();
+    showTransientPopup(clientX-r.left+8, clientY-r.top+8, 'No empty adjacent tiles for spawning');
+    return;
+  }
+  
+  // Show highlighted tiles
+  spawnHighlightTiles = validSpawnTiles.map((t, i) => ({...t, actionNum: 9999}));
+  selectedUnitSpawnSource = {x, y, type: 'barracks'};
+  requestDraw();
+  
+  const menu = document.createElement('div');
+  menu.id = 'barracksSpawnMenu';
+  menu.style.position = 'fixed';
+  menu.style.left = clientX + 'px';
+  menu.style.top = clientY + 'px';
+  menu.style.background = '#fff';
+  menu.style.border = '2px solid #8b6f47';
+  menu.style.borderRadius = '4px';
+  menu.style.padding = '8px 0';
+  menu.style.zIndex = '10001';
+  menu.style.boxShadow = '0 2px 8px rgba(0,0,0,0.2)';
+  menu.style.minWidth = '180px';
+  
+  const units = [
+    { name: 'Swordsman', type: 'swordsman', cost: 10, emoji: '⚔️' },
+    { name: 'Archer', type: 'archer', cost: 20, emoji: '🏹' },
+    { name: 'Shieldman', type: 'shieldman', cost: 30, emoji: '🛡️' },
+    { name: 'Horseman', type: 'horseman', cost: 30, emoji: '🐴' }
+  ];
+  
+  // Add title
+  const title = document.createElement('div');
+  title.textContent = 'Select Unit Type';
+  title.style.padding = '8px 12px';
+  title.style.background = '#8b6f47';
+  title.style.color = '#fff';
+  title.style.fontSize = '12px';
+  title.style.fontWeight = 'bold';
+  title.style.textAlign = 'center';
+  menu.appendChild(title);
+  
+  units.forEach((unit) => {
+    const btn = document.createElement('button');
+    btn.textContent = `${unit.emoji} ${unit.name} | ${unit.cost}g`;
+    btn.style.display = 'block';
+    btn.style.width = '100%';
+    btn.style.padding = '8px 12px';
+    btn.style.border = 'none';
+    btn.style.background = '#f5f5f5';
+    btn.style.color = '#333';
+    btn.style.cursor = 'pointer';
+    btn.style.textAlign = 'left';
+    btn.style.fontSize = '12px';
+    btn.style.borderTop = '1px solid #ecf0f1';
+    btn.style.transition = 'background 0.2s';
+    
+    btn.onmouseover = () => { btn.style.background = '#e8e8e8'; };
+    btn.onmouseout = () => { btn.style.background = '#f5f5f5'; };
+    
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      
+      // Check if player has enough gold
+      if (!state || !state.playersMeta || !state.playersMeta[pid]) {
+        showTransientPopup(clientX+8, clientY+8, 'Game state not ready');
+        menu.remove();
+        selectedUnitSpawnSource = null;
+        spawnHighlightTiles = [];
+        requestDraw();
+        return;
+      }
+      
+      const currentGold = (state.playersMeta[pid].resources && state.playersMeta[pid].resources.gold) || 0;
+      if (currentGold < unit.cost) {
+        flashGoldRed();
+        showTransientPopup(clientX+8, clientY+8, `Need ${unit.cost}g for ${unit.name}, have ${currentGold.toFixed(1)}g`);
+        menu.remove();
+        selectedUnitSpawnSource = null;
+        spawnHighlightTiles = [];
+        requestDraw();
+        return;
+      }
+      
+      // Store unit type in selectedUnitSpawnSource so we know which unit to spawn
+      selectedUnitSpawnSource.auType = unit.type;
+      selectedUnitSpawnSource.unitName = unit.name;
+      
+      // Close menu and wait for player to click on highlighted tile
+      menu.remove();
+      
+      // Update menu to show instruction
+      const r = canvas.getBoundingClientRect();
+      showTransientPopup(clientX-r.left+8, clientY-r.top+8, `Click on highlighted tile to spawn ${unit.name}`);
+    };
+    menu.appendChild(btn);
+  });
+  
+  document.body.appendChild(menu);
+  
+  const closeMenu = (e) => {
+    if (menu.parentNode && !menu.contains(e.target) && !spawnHighlightTiles.some(t => {
+      const canvasRect = canvas.getBoundingClientRect();
+      const tileX = (e.clientX - canvasRect.left) / tileSize;
+      const tileY = (e.clientY - canvasRect.top) / tileSize;
+      return Math.floor(tileX) === t.x && Math.floor(tileY) === t.y;
+    })) {
+      menu.remove();
+      selectedUnitSpawnSource = null;
+      spawnHighlightTiles = [];
+      requestDraw();
+      document.removeEventListener('mousedown', closeMenu);
+    }
+  };
+  document.addEventListener('mousedown', closeMenu);
+}
+
+// Show tower attack menu with tile selection
+function showTowerAttackMenu(x, y, clientX, clientY) {
+  const existing = document.getElementById('towerAttackMenu');
+  if (existing) existing.remove();
+  
+  // Calculate tower attack positions (5x5 box: all adjacent + next layer)
+  // Chebyshev distance 1-2: all tiles within 2 steps in any direction
+  const attackDirs = [];
+  for (let dx = -2; dx <= 2; dx++) {
+    for (let dy = -2; dy <= 2; dy++) {
+      if (dx === 0 && dy === 0) continue;  // Skip tower's own position
+      const maxDist = Math.max(Math.abs(dx), Math.abs(dy));
+      if (maxDist >= 1 && maxDist <= 2) {
+        attackDirs.push([dx, dy]);
+      }
+    }
+  }
+  
+  const validAttackTiles = [];
+  
+  for (const [dx, dy] of attackDirs) {
+    const nx = x + dx, ny = y + dy;
+    // Check if position is within bounds
+    if (nx >= 0 && ny >= 0 && nx < (state?.size || 20) && ny < (state?.size || 20)) {
+      const gridCell = state.grid[ny] && state.grid[ny][nx];
+      // Include all tiles, but mark own for different display
+      const isOwn = gridCell && gridCell.pid === pid;
+      validAttackTiles.push({x: nx, y: ny, isOwn});
+    }
+  }
+  
+  if (validAttackTiles.length === 0) {
+    const r = canvas.getBoundingClientRect();
+    showTransientPopup(clientX-r.left+8, clientY-r.top+8, 'No tiles in range');
+    return;
+  }
+  
+  // Show highlighted attack tiles (no menu popup, just highlights)
+  spawnHighlightTiles = validAttackTiles.map((t, i) => ({...t, actionNum: 9998}));
+  selectedUnitSpawnSource = {x, y, type: 'tower'};
+  requestDraw();
+  
+  // Auto-close highlights after 10 seconds if no attack is made
+  setTimeout(() => {
+    if (selectedUnitSpawnSource && selectedUnitSpawnSource.type === 'tower') {
+      selectedUnitSpawnSource = null;
+      spawnHighlightTiles = [];
+      requestDraw();
+    }
+  }, 10000);
+}
+
+// Show context menu for unit (upgrade or spawn)
+function showUnitContextMenu(x, y, clientX, clientY) {
+  // Remove any existing menu
+  const existing = document.getElementById('unitContextMenu');
+  if (existing) existing.remove();
+  
+  const menu = document.createElement('div');
+  menu.id = 'unitContextMenu';
+  menu.style.position = 'fixed';
+  menu.style.left = clientX + 'px';
+  menu.style.top = clientY + 'px';
+  menu.style.background = '#fff';
+  menu.style.border = '2px solid #34495e';
+  menu.style.borderRadius = '4px';
+  menu.style.padding = '8px 0';
+  menu.style.zIndex = '10000';
+  menu.style.boxShadow = '0 2px 8px rgba(0,0,0,0.2)';
+  menu.style.minWidth = '120px';
+  
+  // Upgrade button - renamed to "Activate" for L3 units
+  const upgradeBtn = document.createElement('button');
+  upgradeBtn.textContent = 'Activate';
+  upgradeBtn.style.display = 'block';
+  upgradeBtn.style.width = '100%';
+  upgradeBtn.style.padding = '8px 12px';
+  upgradeBtn.style.border = 'none';
+  upgradeBtn.style.background = '#3498db';
+  upgradeBtn.style.color = '#fff';
+  upgradeBtn.style.cursor = 'pointer';
+  upgradeBtn.style.textAlign = 'left';
+  upgradeBtn.style.fontSize = '12px';
+  upgradeBtn.onclick = (e) => {
+    e.stopPropagation();
+    socket.emit('action', {roomId, type: 'upgrade', payload: {x, y}}, (res) => {
+      if (res?.ok) flashTile(x, y, '#2ecc71');
+      menu.remove();
+    });
+  };
+  
+  menu.appendChild(upgradeBtn);
+  
+  // Build button (only for L3 units)
+  const unit = state.grid[y][x];
+  if (unit && unit.level === 3) {
+    const buildBtn = document.createElement('button');
+    buildBtn.textContent = 'Build';
+    buildBtn.style.width = '100%';
+    buildBtn.style.padding = '8px 12px';
+    buildBtn.style.border = 'none';
+    buildBtn.style.background = '#e67e22';
+    buildBtn.style.color = '#fff';
+    buildBtn.style.cursor = 'pointer';
+    buildBtn.style.textAlign = 'left';
+    buildBtn.style.fontSize = '12px';
+    buildBtn.style.borderTop = '1px solid #ecf0f1';
+    buildBtn.onclick = (e) => {
+      e.stopPropagation();
+      showBuildingMenu(x, y, clientX, clientY + 40);
+      menu.remove();
+    };
+    menu.appendChild(buildBtn);
+  }
+  
+  // Downgrade button - convert back to SU
+  const downgradeBtn = document.createElement('button');
+  downgradeBtn.textContent = 'Downgrade';
+  downgradeBtn.style.width = '100%';
+  downgradeBtn.style.padding = '8px 12px';
+  downgradeBtn.style.border = 'none';
+  downgradeBtn.style.background = '#e74c3c';
+  downgradeBtn.style.color = '#fff';
+  downgradeBtn.style.cursor = 'pointer';
+  downgradeBtn.style.textAlign = 'left';
+  downgradeBtn.style.fontSize = '12px';
+  downgradeBtn.style.borderTop = '1px solid #ecf0f1';
+  downgradeBtn.onclick = (e) => {
+    e.stopPropagation();
+    socket.emit('action', {roomId, type: 'downgrade', payload: {x, y}}, (res) => {
+      if (res?.ok) flashTile(x, y, '#e74c3c');
+      menu.remove();
+    });
+  };
+  menu.appendChild(downgradeBtn);
+  document.body.appendChild(menu);
+  
+  // Close menu when clicking outside of it
+  const closeMenu = (e) => {
+    // Only close if the click target is not the menu or a child of the menu
+    if (menu.parentNode && !menu.contains(e.target)) {
+      menu.remove();
+      document.removeEventListener('mousedown', closeMenu);
+    }
+  };
+  // Use mousedown instead and add immediately (will skip the initial click)
+  document.addEventListener('mousedown', closeMenu);
+}
+
+// Show context menu for AU (Move or Attack)
+// Find adjacent enemy units (cardinal directions)
+function getAdjacentEnemies(x, y, playerPid) {
+  const enemies = [];
+  const dirs = [[0, -1], [0, 1], [-1, 0], [1, 0]]; // up, down, left, right
+  
+  if (!state || !state.grid) return enemies;
+  const size = state.size;
+  
+  for (const [dx, dy] of dirs) {
+    const nx = x + dx, ny = y + dy;
+    if (nx >= 0 && ny >= 0 && nx < size && ny < size) {
+      const tile = state.grid[ny] && state.grid[ny][nx];
+      // Enemy if it's a unit/AU and belongs to different player
+      if (tile && (tile.type === 'unit' || tile.type === 'au') && tile.pid !== playerPid) {
+        enemies.push({ x: nx, y: ny, tile });
+      }
+    }
+  }
+  return enemies;
+}
+
+function showAUContextMenu(x, y, clientX, clientY) {
+  // Remove any existing menu
+  const existing = document.getElementById('auContextMenu');
+  if (existing) existing.remove();
+  
+  const menu = document.createElement('div');
+  menu.id = 'auContextMenu';
+  menu.style.position = 'fixed';
+  menu.style.left = clientX + 'px';
+  menu.style.top = clientY + 'px';
+  menu.style.background = '#fff';
+  menu.style.border = '2px solid #34495e';
+  menu.style.borderRadius = '4px';
+  menu.style.padding = '8px 0';
+  menu.style.zIndex = '10000';
+  menu.style.boxShadow = '0 2px 8px rgba(0,0,0,0.2)';
+  menu.style.minWidth = '120px';
+  
+  const auUnit = state.grid[y][x];
+  const adjacentEnemies = getAdjacentEnemies(x, y, pid);
+  
+  // Immediate attack button (only if enemy adjacent)
+  if (adjacentEnemies.length > 0) {
+    const immediateAttackBtn = document.createElement('button');
+    immediateAttackBtn.textContent = `⚡ Attack (${adjacentEnemies.length})`;
+    immediateAttackBtn.style.display = 'block';
+    immediateAttackBtn.style.width = '100%';
+    immediateAttackBtn.style.padding = '8px 12px';
+    immediateAttackBtn.style.border = 'none';
+    immediateAttackBtn.style.background = '#e67e22';
+    immediateAttackBtn.style.color = '#fff';
+    immediateAttackBtn.style.cursor = 'pointer';
+    immediateAttackBtn.style.textAlign = 'left';
+    immediateAttackBtn.style.fontSize = '12px';
+    immediateAttackBtn.style.fontWeight = 'bold';
+    immediateAttackBtn.onclick = (e) => {
+      e.stopPropagation();
+      // Show which enemy to attack
+      const canvas = document.getElementById('canvas');
+      const r = canvas.getBoundingClientRect();
+      const firstEnemy = adjacentEnemies[0];
+      socket.emit('action', {
+        roomId,
+        type: 'auAttackAdjacent',
+        payload: { x, y, targetX: firstEnemy.x, targetY: firstEnemy.y }
+      }, (res) => {
+        if (res?.ok) {
+          flashTile(firstEnemy.x, firstEnemy.y, '#e67e22');
+        } else {
+          showTransientPopup(clientX, clientY, res?.err || 'Attack failed');
+        }
+      });
+      menu.remove();
+    };
+    menu.appendChild(immediateAttackBtn);
+  }
+  
+  // Move button
+  const moveBtn = document.createElement('button');
+  moveBtn.textContent = auUnit?.auType === 'horseman' ? 'Move (8 dir)' : 'Move';
+  moveBtn.style.display = 'block';
+  moveBtn.style.width = '100%';
+  moveBtn.style.padding = '8px 12px';
+  moveBtn.style.border = 'none';
+  moveBtn.style.background = '#95a5a6';
+  moveBtn.style.color = '#fff';
+  moveBtn.style.cursor = 'pointer';
+  moveBtn.style.textAlign = 'left';
+  moveBtn.style.fontSize = '12px';
+  moveBtn.style.borderTop = adjacentEnemies.length > 0 ? '1px solid #ecf0f1' : 'none';
+  moveBtn.onclick = (e) => {
+    e.stopPropagation();
+    // Start move selection - show appropriate tiles based on unit type
+    selectedAUActionSource = { x, y };
+    auActionMode = 'move';
+    const auUnit = state.grid[y][x];
+    const actionNum = (auUnit.actionQueue && auUnit.actionQueue.length) || 0;
+    const nextActionNum = actionNum + 1;
+    if (nextActionNum > 1) {
+      alert('This AU already has its action queued (max 1 action)');
+      menu.remove();
+      return;
+    }
+    // Horseman can move in 8 directions; others cardinal only
+    const moveTiles = auUnit?.auType === 'horseman' ? 
+      getHorsemenMovementPositions(x, y) : getSpawnPositions(x, y);
+    auActionHighlights = moveTiles.map(pos => ({...pos, actionNum: nextActionNum}));
+    requestDraw();
+    menu.remove();
+  };
+  
+  // Attack button
+  const attackBtn = document.createElement('button');
+  attackBtn.textContent = 'Attack AU';
+  attackBtn.style.display = 'block';
+  attackBtn.style.width = '100%';
+  attackBtn.style.padding = '8px 12px';
+  attackBtn.style.border = 'none';
+  attackBtn.style.background = '#e74c3c';
+  attackBtn.style.color = '#fff';
+  attackBtn.style.cursor = 'pointer';
+  attackBtn.style.textAlign = 'left';
+  attackBtn.style.fontSize = '12px';
+  attackBtn.style.borderTop = '1px solid #ecf0f1';
+  attackBtn.onclick = (e) => {
+    e.stopPropagation();
+    // Start attack selection - show appropriate attack tiles based on AU type
+    selectedAUActionSource = { x, y };
+    auActionMode = 'attack';
+    const auUnit = state.grid[y][x];
+    const actionNum = (auUnit.actionQueue && auUnit.actionQueue.length) || 0;
+    const nextActionNum = actionNum + 1;
+    if (nextActionNum > 1) {
+      alert('This AU already has its action queued (max 1 action)');
+      menu.remove();
+      return;
+    }
+    
+    // Different units have different attack ranges
+    if (auUnit && auUnit.auType === 'archer') {
+      auActionHighlights = getArcherAttackPositions(x, y).map(pos => ({...pos, actionNum: nextActionNum}));
+    } else if (auUnit && auUnit.auType === 'horseman') {
+      // Horseman: all 8 adjacent tiles (cardinal + diagonal)
+      auActionHighlights = getHorsemenAttackPositions(x, y).map(pos => ({...pos, actionNum: nextActionNum}));
+    } else {
+      // Swordsman/Shieldman: only adjacent cardinal tiles (can attack empty or enemy tiles)
+      auActionHighlights = getSwordsmanAttackPositions(x, y).map(pos => ({...pos, actionNum: nextActionNum}));
+    }
+    
+    requestDraw();
+    menu.remove();
+  };
+  
+  menu.appendChild(moveBtn);
+  menu.appendChild(attackBtn);
+  
+  // Convert to SU button
+  const convertBtn = document.createElement('button');
+  convertBtn.textContent = 'Convert to SU';
+  convertBtn.style.display = 'block';
+  convertBtn.style.width = '100%';
+  convertBtn.style.padding = '8px 12px';
+  convertBtn.style.border = 'none';
+  convertBtn.style.background = '#3498db';
+  convertBtn.style.color = '#fff';
+  convertBtn.style.cursor = 'pointer';
+  convertBtn.style.textAlign = 'left';
+  convertBtn.style.fontSize = '12px';
+  convertBtn.style.borderTop = '1px solid #ecf0f1';
+  convertBtn.onclick = (e) => {
+    e.stopPropagation();
+    socket.emit('action', {
+      roomId,
+      type: 'placeStructureFromAU',
+      payload: { x, y }
+    }, (res) => {
+      if (res?.ok) {
+        flashTile(x, y, '#3498db');
+        requestDraw();
+      } else {
+        showTransientPopup(clientX, clientY, res?.err || 'Conversion failed');
+      }
+    });
+    menu.remove();
+  };
+  menu.appendChild(convertBtn);
+  
+  document.body.appendChild(menu);
+  
+  // Close menu when clicking outside of it
+  const closeMenu = (e) => {
+    if (menu.parentNode && !menu.contains(e.target)) {
+      menu.remove();
+      document.removeEventListener('mousedown', closeMenu);
+    }
+  };
+  document.addEventListener('mousedown', closeMenu);
+}
+
+// Show building selection menu
+function showBuildingMenu(x, y, clientX, clientY) {
+  // Remove any existing menu
+  const existing = document.getElementById('buildingMenu');
+  if (existing) existing.remove();
+  
+  const menu = document.createElement('div');
+  menu.id = 'buildingMenu';
+  menu.style.position = 'fixed';
+  menu.style.left = clientX + 'px';
+  menu.style.top = clientY + 'px';
+  menu.style.background = '#fff';
+  menu.style.border = '2px solid #d4af37';
+  menu.style.borderRadius = '4px';
+  menu.style.padding = '8px 0';
+  menu.style.zIndex = '10001';
+  menu.style.boxShadow = '0 2px 8px rgba(0,0,0,0.2)';
+  menu.style.minWidth = '140px';
+  
+  // Building options: Barracks, Wall, Tower
+  const buildings = [
+    { name: 'Barracks', type: 'barracks', cost: 20, emoji: '🏛️' },
+    { name: 'Wall', type: 'wall', cost: 20, emoji: '🧱' },
+    { name: 'Tower', type: 'tower', cost: 50, emoji: '🗼' }
+  ];
+  
+  buildings.forEach((building) => {
+    const buildBtn = document.createElement('button');
+    buildBtn.textContent = `${building.emoji} ${building.name} | ${building.cost}g`;
+    buildBtn.style.width = '100%';
+    buildBtn.style.padding = '8px 12px';
+    buildBtn.style.border = 'none';
+    buildBtn.style.background = '#e67e22';
+    buildBtn.style.color = '#fff';
+    buildBtn.style.cursor = 'pointer';
+    buildBtn.style.textAlign = 'left';
+    buildBtn.style.fontSize = '12px';
+    buildBtn.style.borderTop = '1px solid #ecf0f1';
+    buildBtn.onclick = (e) => {
+      e.stopPropagation();
+      
+      // Check if player has enough gold BEFORE attempting to build
+      if (!state || !state.playersMeta || !state.playersMeta[pid]) {
+        showTransientPopup(clientX+8, clientY+8, 'Game state not ready');
+        menu.remove();
+        return;
+      }
+      
+      const currentGold = (state.playersMeta[pid].resources && state.playersMeta[pid].resources.gold) || 0;
+      if (currentGold < building.cost) {
+        // Flash gold red - not enough resources
+        flashGoldRed();
+        showTransientPopup(clientX+8, clientY+8, `Need ${building.cost}g for ${building.name}, have ${currentGold.toFixed(1)}g`);
+        menu.remove();
+        return;
+      }
+      
+      // Immediately build on the unit's tile (replacing the unit)
+      socket.emit('action', {
+        roomId,
+        type: 'buildBuilding',
+        payload: {
+          fromX: x,
+          fromY: y,
+          buildingType: building.type
+        }
+      }, (res) => {
+        if (res?.ok) {
+          flashTile(x, y, '#f39c12');
+          selectedBuildingSource = null;
+          buildHighlightTiles = [];
+          requestDraw();
+        } else {
+          showTransientPopup(clientX+8, clientY+8, res?.err || 'Build failed');
+        }
+      });
+      menu.remove();
+    };
+    menu.appendChild(buildBtn);
+  });
+  
+  document.body.appendChild(menu);
+  
+  // Close menu when clicking outside
+  const closeMenu = (e) => {
+    if (menu.parentNode && !menu.contains(e.target)) {
+      menu.remove();
+      document.removeEventListener('mousedown', closeMenu);
+    }
+  };
+  setTimeout(() => document.addEventListener('mousedown', closeMenu), 0);
+}
+
 
 // Camera pan
 const keys = {ArrowUp:false,ArrowDown:false,ArrowLeft:false,ArrowRight:false};
 const panSpeed = 4;
 window.addEventListener('keydown', e=>{if(keys.hasOwnProperty(e.key)){keys[e.key]=true; e.preventDefault();}});
 window.addEventListener('keyup', e=>{if(keys.hasOwnProperty(e.key)) keys[e.key]=false;});
+
 
 let lastFrame = performance.now();
 function panLoop(now=performance.now()){
@@ -842,6 +2110,7 @@ panLoop();
 function tileLabel(x,y){return String.fromCharCode(65+x)+(y+1);}
 function getContrastOutline(hex){const c=(hex||'#000').replace('#','');const r=parseInt(c.substr(0,2),16);const g=parseInt(c.substr(2,2),16);const b=parseInt(c.substr(4,2),16);return(0.299*r+0.587*g+0.114*b)>140?'#000':'#fff';}
 function lightenColor(hex,factor){const c=(hex||'#000').replace('#','');let r=parseInt(c.substr(0,2),16);let g=parseInt(c.substr(2,2),16);let b=parseInt(c.substr(4,2),16);r=Math.min(255,Math.round(r+255*factor));g=Math.min(255,Math.round(g+255*factor));b=Math.min(255,Math.round(b+255*factor));return `rgb(${r},${g},${b})`; }
+function hexToRgb(hex){const c=(hex||'#000').replace('#','');const r=parseInt(c.substr(0,2),16);const g=parseInt(c.substr(2,2),16);const b=parseInt(c.substr(4,2),16);return {r,g,b};}
 
 // Draw a regular hexagon at (x,y) with given radius, fill, stroke, and optional rotation in degrees
 function drawHexagon(x, y, radius, fillColor, strokeColor = null, strokeWidth = 1, rotationDegrees = 0) {
@@ -869,11 +2138,72 @@ function drawUnit(px,py,tileSize,c,color,c1,c2){
   const cx=px+tileSize/2, cy=py+tileSize/2;
   
   // Get unit colors: use custom C1/C2 if available, otherwise use single color
-  const unitC1 = c1 || color; // Inner color (C1) - fills the hexagons
-  const unitC2 = c2 || color; // Background color (C2) - outer ring circle
+  const unitC1 = c1 || color; // Inner color (C1) - fills the hexagons or inner square
+  const unitC2 = c2 || color; // Background color (C2) - outer ring circle or outer square
+  
+  // If this is a square unit (converted from AU), render as square with yellow hp bar
+  if (c.isSquareUnit) {
+    const squareSize = tileSize * 0.75;
+    const squarePadding = (tileSize - squareSize) / 2;
+    const squarePx = px + squarePadding;
+    const squarePy = py + squarePadding;
+    
+    // Draw C2 background square
+    ctx.fillStyle = unitC2;
+    ctx.fillRect(squarePx, squarePy, squareSize, squareSize);
+    
+    // Draw C1 inner square (80% size)
+    const innerSize = squareSize * 0.8;
+    const innerPadding = (squareSize - innerSize) / 2;
+    ctx.fillStyle = unitC1;
+    ctx.fillRect(squarePx + innerPadding, squarePy + innerPadding, innerSize, innerSize);
+    
+    // Draw border
+    ctx.strokeStyle = unitC2;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(squarePx, squarePy, squareSize, squareSize);
+    
+    // Draw level indicator (yellow bar with segments inside bottom of square)
+    const hpBarWidth = squareSize * 0.9;
+    const hpBarHeight = 6;
+    const hpBarX = squarePx + (squareSize - hpBarWidth) / 2;
+    const hpBarY = squarePy + squareSize - hpBarHeight - 2;  // Inside bottom of square
+    const maxLevel = 3;
+    const curLevel = c.level || 1;
+    const segmentCount = 3;
+    const segmentWidth = hpBarWidth / segmentCount;
+    
+    // Draw background (dark)
+    ctx.fillStyle = '#333';
+    ctx.fillRect(hpBarX, hpBarY, hpBarWidth, hpBarHeight);
+    
+    // Draw level fill (yellow) - each level fills one segment
+    ctx.fillStyle = '#FFD700';
+    for (let i = 0; i < curLevel; i++) {
+      ctx.fillRect(hpBarX + i * segmentWidth, hpBarY, segmentWidth - 1, hpBarHeight);
+    }
+    
+    // Draw segment separators
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1;
+    for (let i = 1; i < segmentCount; i++) {
+      ctx.beginPath();
+      ctx.moveTo(hpBarX + i * segmentWidth, hpBarY);
+      ctx.lineTo(hpBarX + i * segmentWidth, hpBarY + hpBarHeight);
+      ctx.stroke();
+    }
+    
+    // Draw outer border
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(hpBarX, hpBarY, hpBarWidth, hpBarHeight);
+    
+    return;  // Don't continue with hexagon rendering
+  }
+  
   
   // Draw large C2 (background color) circle as outer ring
-  const ringRadius = tileSize * 0.35;
+  const ringRadius = tileSize * 0.28;
   ctx.beginPath();
   ctx.fillStyle = unitC2;
   ctx.arc(cx, cy, ringRadius, 0, Math.PI * 2);
@@ -888,11 +2218,10 @@ function drawUnit(px,py,tileSize,c,color,c1,c2){
   if (numGems === 1) {
     gemPositions = [[0, 0]]; // Single gem in center
   } else if (numGems === 2) {
-    // Two gems stacked vertically — small vertical nudge to improve alignment with texture
-    gemPositions = [[0, -tileSize * 0.11], [0, tileSize * 0.11]];
+    // Two gems stacked vertically - adjusted spacing for better alignment
+    gemPositions = [[0, -tileSize * 0.095], [0, tileSize * 0.095]];
   } else if (numGems === 3) {
-    // Three gems in triangle — positions tuned to sit within each texture hexagon
-    // Restore top gem slightly higher so it aligns with texture (was too low)
+    // Three gems in triangle
     gemPositions = [
       [0, -tileSize * 0.12],
       [-tileSize * 0.11, tileSize * 0.06],
@@ -900,39 +2229,30 @@ function drawUnit(px,py,tileSize,c,color,c1,c2){
     ];
   }
   
-  // Draw hexagon gems with C1 (inner color) fill and dark gray stroke
-  // Use same base radius for L1/L3, slightly smaller for L2 so gems don't poke out
+  // Draw hexagon gems with C1 (inner color) fill - BEFORE texture so it's visible on top of C2
   let hexRadius;
-  if (numGems === 2) hexRadius = tileSize * 0.088; // slightly reduced for level 2
+  if (numGems === 2) hexRadius = tileSize * 0.088;
   else hexRadius = tileSize * 0.095;
-  const hexStrokeWidth = 0;
+  const hexStrokeWidth = 2;
   
+  // Draw C1 gems (these should be visible regardless of texture)
   for (const [offsetX, offsetY] of gemPositions) {
     const gemX = cx + offsetX;
     const gemY = cy + offsetY;
-    
-    // All hexagons rotated 90 degrees
     const rotation = 90;
-    
-    // Draw hexagon: C1 fill, no stroke
-    drawHexagon(gemX, gemY, hexRadius, unitC1, null, hexStrokeWidth, rotation);
+    drawHexagon(gemX, gemY, hexRadius, unitC1, unitC2, hexStrokeWidth, rotation);
   }
   
-  // Draw unit texture if available (texture overlays on top of everything)
+  // Try to draw unit texture on top of everything
   let unitTexture = null;
-  if (customTextures.unitLevels && c.level >= 1 && c.level <= 3) {
-    unitTexture = customTextures.unitLevels[c.level - 1];
+  if (customTextures.unitLevels && numGems >= 1 && numGems <= 3) {
+    unitTexture = customTextures.unitLevels[numGems - 1];
   }
-  
   if (unitTexture && unitTexture.complete && unitTexture.naturalWidth) {
-    // Draw unit texture centered on tile
-    const unitSize = tileSize * 0.72;
-    try {
-      ctx.drawImage(unitTexture, cx - unitSize/2, cy - unitSize/2, unitSize, unitSize);
-    } catch(e) {
-      console.warn('Error drawing unit texture:', e);
-    }
+    const unitSize = tileSize * 0.6;
+    ctx.drawImage(unitTexture, cx - unitSize / 2, cy - unitSize / 2, unitSize, unitSize);
   }
+
 }
 
 // Leaderboard
@@ -979,6 +2299,9 @@ function requestDraw() {
   });
 }
 
+// Initialize canvas size after drawRequested is declared
+resizeCanvas();
+
 // Check if a water tile has only water in straight directions (up, down, left, right)
 function isWaterSurroundedByWater(x, y, terrain) {
   if (!terrain || !state) return false;
@@ -1014,6 +2337,17 @@ function draw(){
     ctx.fillRect(0,0,canvas.width,canvas.height);
     return;
   }
+  
+  // Log claims count if they exist (debug)
+  if (state.claims && Object.keys(state.claims).length > 0 && !window.claimsLogged) {
+    console.log(`📍 State has claims:`, Object.keys(state.claims).length, `tiles claimed`);
+    console.log(`Claims by player:`, Object.values(state.claims).reduce((acc, pid) => {
+      acc[pid] = (acc[pid] || 0) + 1;
+      return acc;
+    }, {}));
+    window.claimsLogged = true;
+  }
+  
   const size = state.size;
   const tSize = baseTile(size)*zoom;
   ctx.clearRect(0,0,canvas.width,canvas.height);
@@ -1023,6 +2357,8 @@ function draw(){
   // Pre-set image quality for entire frame (avoid per-tile overhead)
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
+  
+  let auRenderCount = 0;
 
   // draw tiles
   for(let y=0;y<size;y++){
@@ -1059,6 +2395,43 @@ function draw(){
           try { ctx.drawImage(grassTexture, px, py, tSize, tSize); }
           catch (e) { ctx.fillStyle = '#ffffff'; ctx.fillRect(px, py, tSize, tSize); }
         } else { ctx.fillStyle = '#ffffff'; ctx.fillRect(px, py, tSize, tSize); }
+      }
+
+      // Draw claimed land overlay (event-style with diagonal stripes using both C1 and C2)
+      const claimKey = `${x},${y}`;
+      if (showClaims && state.claims && state.claims[claimKey] !== undefined) {
+        const claimedByPid = state.claims[claimKey];
+        const claimedByMeta = state.playersMeta[claimedByPid];
+        const c1Color = claimedByMeta ? claimedByMeta.c1 : '#fff';
+        const c2Color = claimedByMeta ? claimedByMeta.c2 : '#000';
+        
+        // Draw claim overlay with event-style diagonal stripes (40% alpha)
+        ctx.save();
+        ctx.globalAlpha = 0.4;
+        
+        // Fill background with C2 color
+        ctx.fillStyle = c2Color;
+        ctx.fillRect(px, py, tSize, tSize);
+        
+        // Draw diagonal stripes (45-degree angle) with C1 color
+        ctx.strokeStyle = c1Color;
+        ctx.lineWidth = Math.max(2, tSize * 0.08);
+        const stripeSpacing = tSize * 0.25;
+        
+        // Clip to tile bounds
+        ctx.beginPath();
+        ctx.rect(px, py, tSize, tSize);
+        ctx.clip();
+        
+        // Draw diagonal lines across the tile
+        for (let offset = -tSize; offset < tSize * 2; offset += stripeSpacing) {
+          ctx.beginPath();
+          ctx.moveTo(px + offset, py);
+          ctx.lineTo(px + offset + tSize * 2, py + tSize * 2);
+          ctx.stroke();
+        }
+        
+        ctx.restore();
       }
 
       // Tile borders removed - textures now connect seamlessly
@@ -1157,7 +2530,269 @@ function draw(){
 
       if(cell?.type==='unit') {
         const playerMeta = state.playersMeta[cell.pid] || {};
+        // Debug C1/C2 colors
+        if (!window.colorDebugLogged) {
+          console.log(`🎨 Player ${cell.pid} colors - color: ${playerMeta.color}, c1: ${playerMeta.c1}, c2: ${playerMeta.c2}`);
+          window.colorDebugLogged = true;
+        }
         drawUnit(px, py, tSize, cell, playerMeta.color || '#666', playerMeta.c1, playerMeta.c2);
+      }
+
+      // Draw AU (Advanced Unit) - Colored square with sword emoji and HP bar
+      if(cell?.type === 'au') {
+        auRenderCount++;
+        const playerMeta = state.playersMeta[cell.pid] || {};
+        console.log(`🎖️ Rendering AU at (${x},${y}) for player ${cell.pid}`);
+        const c2Color = playerMeta.c2 || '#000';  // C2 color for background
+        const c1Color = playerMeta.c1 || '#fff';  // C1 color for inner
+        const cx = px + tSize / 2;
+        const cy = py + tSize / 2;
+        
+        // Draw C2 background square (larger, matching SU size approximately)
+        const squareSize = tSize * 0.75;
+        const squarePadding = (tSize - squareSize) / 2;
+        const squarePx = px + squarePadding;
+        const squarePy = py + squarePadding;
+        
+        ctx.fillStyle = c2Color;
+        ctx.fillRect(squarePx, squarePy, squareSize, squareSize);
+        
+        // Draw C1 inner square (80% of outer square size)
+        const innerSize = squareSize * 0.8;
+        const innerPadding = (squareSize - innerSize) / 2;
+        ctx.fillStyle = c1Color;
+        ctx.fillRect(squarePx + innerPadding, squarePy + innerPadding, innerSize, innerSize);
+        
+        // Draw border around AU
+        ctx.strokeStyle = c2Color;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(squarePx, squarePy, squareSize, squareSize);
+        
+        // Draw symbol in the middle
+        ctx.save();
+        ctx.font = `bold ${Math.floor(tSize * 0.5)}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = c2Color;
+        
+        // Choose symbol based on AU type
+        let symbol = '⚔';  // Default: Swordsman
+        if (cell.auType === 'archer') symbol = '🏹';
+        else if (cell.auType === 'shieldman') symbol = '🛡️';
+        else if (cell.auType === 'horseman') symbol = '🐴';
+        
+        ctx.fillText(symbol, cx, cy - 2);
+        ctx.restore();
+        
+        // Draw HP bar - max HP depends on AU type
+        const auMaxHp = {
+          swordsman: 3,
+          archer: 2,
+          shieldman: 5,
+          horseman: 3
+        };
+        const maxHp = auMaxHp[cell.auType] || 3;
+        const curHp = Math.max(0, Math.min(maxHp, cell.hp || maxHp));
+        
+        const hpBarWidth = squareSize * 0.9;
+        const hpBarHeight = 5;
+        const hpBarX = squarePx + (squareSize - hpBarWidth) / 2;
+        const hpBarY = squarePy + squareSize + 4;
+        const segmentCount = maxHp;
+        const segmentWidth = hpBarWidth / segmentCount;
+        
+        // Draw background (dark)
+        ctx.fillStyle = '#333';
+        ctx.fillRect(hpBarX, hpBarY, hpBarWidth, hpBarHeight);
+        
+        // Draw health fill (green) - hp represents full segments
+        ctx.fillStyle = '#00cc00';
+        for (let i = 0; i < curHp; i++) {
+          ctx.fillRect(hpBarX + i * segmentWidth, hpBarY, segmentWidth - 1, hpBarHeight);
+        }
+        
+        // Draw segment separators
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1;
+        for (let i = 1; i < segmentCount; i++) {
+          ctx.beginPath();
+          ctx.moveTo(hpBarX + i * segmentWidth, hpBarY);
+          ctx.lineTo(hpBarX + i * segmentWidth, hpBarY + hpBarHeight);
+          ctx.stroke();
+        }
+        
+        // Draw outer border
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(hpBarX, hpBarY, hpBarWidth, hpBarHeight);
+        
+        // Draw action indicator (checkmark if has action, X if idle) below the sword
+        const hasActions = cell.actionQueue && cell.actionQueue.length > 0;
+        const actionSymbol = hasActions ? '✓' : '✕';
+        
+        ctx.save();
+        ctx.font = `bold ${Math.floor(tSize * 0.1)}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        
+        // Draw white fill with black outline below the sword, with padding from bottom
+        const symbolX = cx;
+        const symbolY = cy + tSize * 0.22;
+        
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(actionSymbol, symbolX, symbolY);
+        
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 1.5;
+        ctx.strokeText(actionSymbol, symbolX, symbolY);
+        
+        ctx.restore();
+      }
+
+      // Draw Building (Barracks, Wall, Tower)
+      if(cell?.type === 'building') {
+        const playerMeta = state.playersMeta[cell.pid] || {};
+        const c1Color = playerMeta.c1 || '#fff';  // C1 accent color
+        const c2Color = playerMeta.c2 || '#000';  // C2 accent color
+        const cx = px + tSize / 2;
+        const cy = py + tSize / 2;
+        
+        // Draw building core square in center
+        const buildingSize = tSize * 0.65;
+        const buildingPadding = (tSize - buildingSize) / 2;
+        const buildingX = px + buildingPadding;
+        const buildingY = py + buildingPadding;
+        
+        // Fill with background color based on building type
+        ctx.fillStyle = c2Color;
+        ctx.fillRect(buildingX, buildingY, buildingSize, buildingSize);
+        
+        // Draw building-specific texture using C1 and C2
+        if (cell.buildingType === 'tower') {
+          // TOWER: 5x5 grid showing range with center in C2
+          const innerSize = buildingSize * 0.85;
+          const innerPad = (buildingSize - innerSize) / 2;
+          const innerX = buildingX + innerPad;
+          const innerY = buildingY + innerPad;
+          
+          const gridSize = 5;
+          const cellSize = innerSize / gridSize;
+          
+          for (let row = 0; row < gridSize; row++) {
+            for (let col = 0; col < gridSize; col++) {
+              const x0 = innerX + col * cellSize;
+              const y0 = innerY + row * cellSize;
+              
+              const distFromCenter = Math.max(Math.abs(col - 2), Math.abs(row - 2));
+              
+              if (distFromCenter === 0) {
+                // Center square is C2
+                ctx.fillStyle = c2Color;
+                ctx.fillRect(x0, y0, cellSize, cellSize);
+              } else if (distFromCenter === 1) {
+                ctx.fillStyle = c1Color;
+                ctx.fillRect(x0, y0, cellSize, cellSize);
+              } else if (distFromCenter === 2) {
+                ctx.fillStyle = c2Color;
+                ctx.fillRect(x0, y0, cellSize, cellSize);
+              }
+              
+              ctx.strokeStyle = '#000000';
+              ctx.lineWidth = 0.5;
+              ctx.strokeRect(x0, y0, cellSize, cellSize);
+            }
+          }
+          
+          // Draw center circle in C2 color
+          ctx.fillStyle = c2Color;
+          ctx.beginPath();
+          ctx.arc(buildingX + buildingSize / 2, buildingY + buildingSize / 2, cellSize * 0.35, 0, Math.PI * 2);
+          ctx.fill();
+          
+        } else if (cell.buildingType === 'barracks') {
+          // BARRACKS: Vertical stripes of C1 and C2 (soldiers standing in formation)
+          const stripeWidth = buildingSize / 6;
+          for (let i = 0; i < 6; i++) {
+            ctx.fillStyle = i % 2 === 0 ? c1Color : c2Color;
+            ctx.fillRect(buildingX + i * stripeWidth, buildingY, stripeWidth, buildingSize);
+          }
+          
+          // Add horizontal accent bars
+          ctx.strokeStyle = '#000';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(buildingX, buildingY + buildingSize * 0.33);
+          ctx.lineTo(buildingX + buildingSize, buildingY + buildingSize * 0.33);
+          ctx.stroke();
+          
+          ctx.beginPath();
+          ctx.moveTo(buildingX, buildingY + buildingSize * 0.66);
+          ctx.lineTo(buildingX + buildingSize, buildingY + buildingSize * 0.66);
+          ctx.stroke();
+          
+        } else if (cell.buildingType === 'wall') {
+          // WALL: Simple diagonal diamond pattern (same for all walls, no connection visuals)
+          const diamondSize = buildingSize / 4;
+
+          for (let row = 0; row < 4; row++) {
+            for (let col = 0; col < 4; col++) {
+              const x_pos = buildingX + col * diamondSize;
+              const y_pos = buildingY + row * diamondSize;
+              
+              // Checkerboard pattern
+              if ((row + col) % 2 === 0) {
+                ctx.fillStyle = c1Color;
+              } else {
+                ctx.fillStyle = c2Color;
+              }
+              
+              // Draw normal diamond (same for all walls)
+              ctx.beginPath();
+              ctx.moveTo(x_pos + diamondSize * 0.5, y_pos);
+              ctx.lineTo(x_pos + diamondSize, y_pos + diamondSize * 0.5);
+              ctx.lineTo(x_pos + diamondSize * 0.5, y_pos + diamondSize);
+              ctx.lineTo(x_pos, y_pos + diamondSize * 0.5);
+              ctx.closePath();
+              ctx.fill();
+              
+              ctx.strokeStyle = '#000';
+              ctx.lineWidth = 0.5;
+              ctx.stroke();
+            }
+          }
+        }
+        
+        // Darker border for definition (use 1px stroke and align to pixel grid)
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(buildingX + 0.5, buildingY + 0.5, buildingSize - 1, buildingSize - 1);
+        
+        // Draw HP bar
+        if (typeof cell.hp === 'number') {
+          const hpBarWidth = buildingSize * 0.8;
+          const hpBarHeight = 4;
+          const hpBarX = buildingX + (buildingSize - hpBarWidth) / 2;
+          const hpBarY = buildingY + buildingSize + 3;
+          const maxHp = cell.maxHp || 5;
+          const curHp = Math.max(0, Math.min(maxHp, cell.hp));
+          const segmentCount = maxHp;
+          const segmentWidth = hpBarWidth / segmentCount;
+          
+          // Draw background
+          ctx.fillStyle = '#333';
+          ctx.fillRect(hpBarX, hpBarY, hpBarWidth, hpBarHeight);
+          
+          // Draw health
+          ctx.fillStyle = '#00cc00';
+          for (let i = 0; i < curHp; i++) {
+            ctx.fillRect(hpBarX + i * segmentWidth, hpBarY, segmentWidth - 0.5, hpBarHeight);
+          }
+          
+          // Draw border
+          ctx.strokeStyle = '#000';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(hpBarX, hpBarY, hpBarWidth, hpBarHeight);
+        }
       }
 
       // coordinate box top-right (only if enabled)
@@ -1187,7 +2822,124 @@ function draw(){
     ctx.restore();
   }
 
-  // last move highlight
+  // Render spawn highlight tiles (green overlay for spawn positions, or red/white for tower attacks)
+  if (spawnHighlightTiles && spawnHighlightTiles.length > 0) {
+    ctx.save();
+    ctx.globalAlpha = 0.4;
+    
+    // Check if this is a tower attack highlight (selectedUnitSpawnSource.type === 'tower')
+    const isTowerAttack = selectedUnitSpawnSource && selectedUnitSpawnSource.type === 'tower';
+    
+    for (const tile of spawnHighlightTiles) {
+      const sx = (tile.x - offsetX) * baseTile(state.size) * zoom;
+      const sy = (tile.y - offsetY) * baseTile(state.size) * zoom;
+      const tSize = baseTile(state.size) * zoom;
+      
+      // Determine color: red for tower attack enemies, white for own, green for spawn
+      let fillColor = '#27ae60'; // Default green for spawn
+      if (isTowerAttack) {
+        fillColor = tile.isOwn ? '#ffffff' : '#e74c3c'; // White for own, red for enemy
+      }
+      
+      ctx.fillStyle = fillColor;
+      ctx.fillRect(sx, sy, tSize, tSize);
+      
+      // Border around tile
+      ctx.globalAlpha = 0.8;
+      ctx.strokeStyle = fillColor;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(sx + 2, sy + 2, tSize - 4, tSize - 4);
+      ctx.globalAlpha = 0.4;
+    }
+    ctx.restore();
+  }
+
+  // Render building highlight tiles (orange overlay for building positions)
+  if (buildHighlightTiles && buildHighlightTiles.length > 0) {
+    ctx.save();
+    ctx.globalAlpha = 0.4;
+    ctx.fillStyle = '#f39c12';  // Orange for building
+    for (const tile of buildHighlightTiles) {
+      const sx = (tile.x - offsetX) * baseTile(state.size) * zoom;
+      const sy = (tile.y - offsetY) * baseTile(state.size) * zoom;
+      ctx.fillRect(sx, sy, baseTile(state.size) * zoom, baseTile(state.size) * zoom);
+      
+      // Border around build tile
+      ctx.globalAlpha = 0.8;
+      ctx.strokeStyle = '#f39c12';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(sx + 2, sy + 2, baseTile(state.size) * zoom - 4, baseTile(state.size) * zoom - 4);
+      ctx.globalAlpha = 0.4;
+    }
+    ctx.restore();
+  }
+
+  // Render AU action highlights (Move/Attack)
+  if (auActionHighlights && auActionHighlights.length > 0) {
+    ctx.save();
+    
+    // Render each tile with appropriate color (blue for move, red for attack, white for own)
+    for (const tile of auActionHighlights) {
+      const sx = (tile.x - offsetX) * baseTile(state.size) * zoom;
+      const sy = (tile.y - offsetY) * baseTile(state.size) * zoom;
+      const tSize = baseTile(state.size) * zoom;
+      
+      // Determine color based on mode and ownership
+      let color;
+      if (auActionMode === 'move') {
+        color = '#3498db'; // blue for move
+      } else {
+        // Attack mode: red for enemy, white for own
+        color = tile.isOwn ? '#ffffff' : '#e74c3c';
+      }
+      
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = color;
+      ctx.fillRect(sx, sy, tSize, tSize);
+      
+      // Border
+      ctx.globalAlpha = 0.8;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(sx + 2, sy + 2, tSize - 4, tSize - 4);
+    }
+    
+    // Draw action numbers
+    for (const tile of auActionHighlights) {
+      const sx = (tile.x - offsetX) * baseTile(state.size) * zoom;
+      const sy = (tile.y - offsetY) * baseTile(state.size) * zoom;
+      const tSize = baseTile(state.size) * zoom;
+      
+      ctx.globalAlpha = 1.0;
+      ctx.fillStyle = '#000';
+      ctx.font = 'bold 14px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(tile.actionNum || '?', sx + tSize / 2, sy + tSize / 2);
+    }
+    
+    ctx.restore();
+  }
+
+  // Render structure placement highlights (blue for AU placement)
+  if (structurePlacementHighlights && structurePlacementHighlights.length > 0) {
+    ctx.save();
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = '#3498db';  // blue
+    for (const tile of structurePlacementHighlights) {
+      const sx = (tile.x - offsetX) * baseTile(state.size) * zoom;
+      const sy = (tile.y - offsetY) * baseTile(state.size) * zoom;
+      ctx.fillRect(sx, sy, baseTile(state.size) * zoom, baseTile(state.size) * zoom);
+      
+      // Border
+      ctx.globalAlpha = 0.8;
+      ctx.strokeStyle = '#3498db';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(sx + 2, sy + 2, baseTile(state.size) * zoom - 4, baseTile(state.size) * zoom - 4);
+      ctx.globalAlpha = 0.35;
+    }
+    ctx.restore();
+  }
   if(state.lastMove) {
     const lm = state.lastMove;
     const lx = (lm.x - offsetX) * baseTile(state.size) * zoom;
@@ -1215,6 +2967,11 @@ function draw(){
     ctx.fillStyle=h.color; ctx.globalAlpha=0.3; ctx.fillRect(px,py,baseTile(state.size)*zoom,baseTile(state.size)*zoom); ctx.globalAlpha=1;
   }
 
+  // Log AU render count  
+  if (auRenderCount > 0) {
+    console.log(`🎖️ Drew ${auRenderCount} AU units in this frame`);
+  }
+
   // turn info
   if(turnInfo && state) {
     const actPid = state.turnOrder[state.activeIndex];
@@ -1225,8 +2982,13 @@ function draw(){
 
 // render players list in lobby
 function renderPlayersList(players) {
-  playersList.innerHTML = '';
-  for (const p of players) {
+  playersList.innerHTML = '<h4 style="margin:0 0 6px 0;color:var(--accent-gold)">Players</h4>';
+  botsList.innerHTML = '<h4 style="margin:0 0 6px 0;color:var(--accent-gold)">Bots</h4>';
+
+  const humans = players.filter(p => !p.isAI);
+  const bots = players.filter(p => p.isAI);
+
+  for (const p of humans) {
     const div = document.createElement('div');
     div.style.display = 'flex';
     div.style.alignItems = 'center';
@@ -1239,8 +3001,7 @@ function renderPlayersList(players) {
     const playerInfo = document.createElement('span');
     playerInfo.innerHTML = `<span style="display:inline-block;width:12px;height:12px;background:${p.color};border-radius:3px;margin-right:4px"></span>${p.name} (${p.pid}) ${p.alive===false?'?':''}`;
     div.appendChild(playerInfo);
-    
-    // Add kick button if host and not the host themselves
+
     if (isHost && p.pid !== 0) {
       const kickBtn = document.createElement('button');
       kickBtn.textContent = 'Kick';
@@ -1262,8 +3023,47 @@ function renderPlayersList(players) {
       });
       div.appendChild(kickBtn);
     }
-    
+
     playersList.appendChild(div);
+  }
+
+  for (const p of bots) {
+    const div = document.createElement('div');
+    div.style.display = 'flex';
+    div.style.alignItems = 'center';
+    div.style.justifyContent = 'space-between';
+    div.style.marginBottom = '6px';
+    div.style.padding = '4px';
+    div.style.background = '#f3f3f3';
+    div.style.borderRadius = '4px';
+
+    const botInfo = document.createElement('span');
+    botInfo.innerHTML = `<span style="display:inline-block;width:12px;height:12px;background:${p.color};border-radius:3px;margin-right:4px"></span>${p.name} (bot ${p.pid})`;
+    div.appendChild(botInfo);
+
+    if (isHost) {
+      const kickBtn = document.createElement('button');
+      kickBtn.textContent = 'Kick Bot';
+      kickBtn.style.padding = '2px 6px';
+      kickBtn.style.fontSize = '12px';
+      kickBtn.style.background = '#c0392b';
+      kickBtn.style.color = '#fff';
+      kickBtn.style.border = 'none';
+      kickBtn.style.borderRadius = '3px';
+      kickBtn.style.cursor = 'pointer';
+      kickBtn.addEventListener('click', () => {
+        socket.emit('kickPlayer', { roomId, targetPid: p.pid }, (res) => {
+          if (res && res.ok) {
+            alert(`Kicked bot ${p.name}`);
+          } else {
+            alert(res?.err || 'Kick failed');
+          }
+        });
+      });
+      div.appendChild(kickBtn);
+    }
+
+    botsList.appendChild(div);
   }
 }
 
